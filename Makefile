@@ -261,8 +261,9 @@ test-kind: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce t
 	GATEWAY_USES_REDIS=$(REDIS) \
 	.venv/bin/python -m pytest tests/ -v $(TEST_ARGS); \
 	STATUS=$$?; \
-	kill $$PF_PID 2>/dev/null || true; \
-	pkill -f "kubectl.*port-forward.*gateway" 2>/dev/null || true; \
+	kill $$PF_PID 2>/dev/null; \
+	wait $$PF_PID 2>/dev/null; \
+	pkill -f "kubectl.*port-forward.*gateway" 2>/dev/null; \
 	exit $$STATUS
 
 .PHONY: test-kind-tls
@@ -286,7 +287,8 @@ test-kind-tls: venv  ## pytest via port-forward with gateway TLS enabled (includ
 	REQUESTS_CA_BUNDLE=$$TMP_CA \
 	.venv/bin/python -m pytest tests/ -v $(TEST_ARGS); \
 	STATUS=$$?; \
-	kill $$PF_PID 2>/dev/null || true; \
-	pkill -f "kubectl.*port-forward.*gateway" 2>/dev/null || true; \
+	kill $$PF_PID 2>/dev/null; \
+	wait $$PF_PID 2>/dev/null; \
+	pkill -f "kubectl.*port-forward.*gateway" 2>/dev/null; \
 	rm -f $$TMP_CA; \
 	exit $$STATUS
