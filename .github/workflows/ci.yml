@@ -131,6 +131,9 @@ jobs:
     needs: [build-push]
     # Only run on main pushes; PRs run smoke only to save time
     if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -138,6 +141,13 @@ jobs:
         with:
           go-version: "1.21"
           cache: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install kind
         run: |
@@ -156,10 +166,6 @@ jobs:
         run: |
           make kind-up
           make images-pull IMAGE_TAG=${{ github.sha }}
-          # Pull and tag the controller image so kind can load it
-          docker pull ${{ env.CONTROLLER_IMAGE }}:${{ github.sha }}
-          docker tag  ${{ env.CONTROLLER_IMAGE }}:${{ github.sha }} secure-svc-gw-controller:dev
-          kind load docker-image secure-svc-gw-controller:dev --name secure-svc-gw
           make helm-install-backends
           make helm-install-gateway \
             GATEWAY_EXTRA_SET="--set redis.enabled=true --set controller.enabled=true"
