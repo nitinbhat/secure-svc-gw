@@ -1,0 +1,11 @@
+apiVersion: v2
+name: secure-svc-backends
+description: |
+  Backend services for the Secure Service Gateway demo.
+  Deploys llm-1..3, embed-1..2 (legit, signed by secure-svc-gw CA)
+  and llm-4 (the rogue impostor, signed by rogue-ca).
+  Install this BEFORE the gateway so pods are ready when the
+  gateway starts health-probing.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,29 @@
+# build outputs
+bin/
+dist/
+
+# go build / module cache (e.g. if GOPATH or GOMODCACHE is inside the repo)
+.gocache/
+
+# generated crypto material + config (regenerate with `make certs`)
+certs/
+clients/
+config/gateway.yaml
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# editors
+.vscode/
+.idea/
+.DS_Store
+
+# helm
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock
+
+# kind kubeconfig
+kubeconfig

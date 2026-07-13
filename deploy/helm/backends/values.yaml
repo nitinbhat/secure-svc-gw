@@ -1,0 +1,36 @@
+image: secure-svc-backend:dev
+imagePullPolicy: IfNotPresent
+
+# ---- legit service pools ------------------------------------------------
+# Each entry produces one Deployment + headless Service per backend name.
+# TLS secret must contain: ca.crt  tls.crt  tls.key (signed by secure-svc-gw CA).
+services:
+  - name: llm
+    port: 8443
+    tlsSecret: backend-llm-tls
+    backends: [llm-1, llm-2, llm-3]
+  - name: embed
+    port: 8443
+    tlsSecret: backend-embed-tls
+    backends: [embed-1, embed-2]
+
+# ---- rogue impostor (spoofed-backend demo) ------------------------------
+# Runs the same code as a legit llm replica but its TLS cert is signed
+# by rogue-ca (backend-rogue-tls secret). The gateway will probe it every
+# 2s, the TLS handshake will fail, and it stays out of the healthy pool.
+# Set enabled: false to skip the spoof demo.
+rogue:
+  enabled: true
+  name: llm-4       # must match gateway values.yaml services[0].backends
+  service: llm
+  port: 8443
+  tlsSecret: backend-rogue-tls
+
+# ---- network policy (enforced by Calico) --------------------------------
+# Deny all ingress to backend pods except from gateway pods in
+# `gatewayNamespace`. This is the correct chart to own the policy since
+# NetworkPolicies are namespace-scoped and their podSelector matches
+# pods in their own namespace.
+networkPolicy:
+  enabled: true
+gatewayNamespace: secure-svc-gw

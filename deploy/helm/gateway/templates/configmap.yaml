@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  labels: {{- include "gw.labels" . | nindent 4 }}
+data:
+  gateway.yaml: |
+    listen_addr: ":8080"
+    metrics_addr: ":9090"
+    issuer: {{ .Values.issuer | quote }}
+    audience: {{ .Values.audience | quote }}
+    nonce_ttl: {{ .Values.nonceTTL }}
+    {{- if .Values.redis.enabled }}
+    redis_url: {{ .Values.redis.url | quote }}
+    {{- end }}
+    {{- if .Values.tls.enabled }}
+    listen_cert: /etc/gateway/listener-tls/tls.crt
+    listen_key:  /etc/gateway/listener-tls/tls.key
+    {{- end }}
+    ca_cert: /etc/gateway/certs/ca.crt
+    gateway_cert: /etc/gateway/certs/gateway.crt
+    gateway_key: /etc/gateway/certs/gateway.key
+    client_keys:
+{{- range .Values.clientKeys }}
+      - kid: {{ .kid | quote }}
+        pub: {{ .pubBase64 | quote }}
+        sub: {{ .sub | quote }}
+        scopes: [{{ range $i, $s := .scopes }}{{ if $i }}, {{ end }}{{ $s | quote }}{{ end }}]
+{{- end }}
+    services:
+{{- range $svc := .Values.services }}
+      - name: {{ $svc.name | quote }}
+        health_path: {{ $svc.healthPath | quote }}
+        backends:
+{{- range $svc.backends }}
+          - id: {{ . | quote }}
+            addr: {{ printf "https://%s.%s.svc.cluster.local:%d" . $.Values.backendsNamespace (int $svc.port) | quote }}
+{{- end }}
+{{- end }}
+    routes:
+{{- range .Values.routes }}
+      - prefix: {{ .prefix | quote }}
+        service: {{ .service | quote }}
+        required_scope: {{ .requiredScope | quote }}
+{{- end }}

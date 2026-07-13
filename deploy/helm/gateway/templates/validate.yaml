@@ -1,0 +1,3 @@
+{{- if and (gt (int .Values.replicas) 1) (not .Values.redis.enabled) -}}
+{{- fail "gateway chart validation failed: replicas > 1 requires redis.enabled=true for distributed replay defense" -}}
+{{- end -}}

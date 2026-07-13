@@ -1,0 +1,152 @@
+# Secure Service Gateway -- end-to-end demo on Docker Compose.
+#
+# Topology (all one docker bridge network "secure-svc-gw"):
+#
+#   chatbot / search-svc / analyst / intern  (test callers)
+#          |
+#          v      Ed25519 JWT
+#      +---------+
+#      | gateway |  Go, mTLS to backends
+#      +----+----+
+#           |
+#     +-----+-------------------+
+#     |     |         |         |
+#   llm-1  llm-2  llm-3       llm-4  <- IMPOSTOR (rogue-ca)
+#     ^ each replica represents        rejected by gateway TLS check
+#       a different LLM provider
+#       (GPT / Claude / Gemini / Kimi
+#        behind a common completions API)
+#
+#     +--------+--------+
+#     |        |
+#  embed-1  embed-2
+#
+# Every backend serves TLS + REQUIRES a client cert signed by ./certs/ca.crt.
+# The gateway is the only holder of that client cert.
+#
+# The impostor llm-4 container serves TLS with a cert signed by ./certs/rogue-ca.crt.
+# The gateway probes it every 2s, the TLS handshake fails at CA verification,
+# and it is never admitted to the llm pool. This is the spoofed-backend demo.
+
+x-backend: &backend
+  build: ./backend
+  restart: unless-stopped
+  networks: [ssgw]
+
+x-python-runner: &python-runner
+  build:
+    context: .
+    dockerfile: tests/Dockerfile
+  environment:
+    GATEWAY_URL: http://gateway:8080
+    METRICS_URL: http://gateway:9090
+    CLIENTS_DIR: /work/clients
+    PYTHONPATH: /work
+    GATEWAY_USES_REDIS: "1"
+  volumes:
+    - ./client:/work/client:ro
+    - ./clients:/work/clients:ro
+  networks: [ssgw]
+
+services:
+
+  # ---- llm: 3 legit replicas + 1 IMPOSTOR ----
+  llm-1:
+    <<: *backend
+    environment: { SERVICE: llm, BACKEND_ID: llm-1 }
+    volumes:
+      - ./certs/llm.crt:/etc/backend/tls/tls.crt:ro
+      - ./certs/llm.key:/etc/backend/tls/tls.key:ro
+      - ./certs/ca.crt:/etc/backend/tls/ca.crt:ro
+  llm-2:
+    <<: *backend
+    environment: { SERVICE: llm, BACKEND_ID: llm-2 }
+    volumes:
+      - ./certs/llm.crt:/etc/backend/tls/tls.crt:ro
+      - ./certs/llm.key:/etc/backend/tls/tls.key:ro
+      - ./certs/ca.crt:/etc/backend/tls/ca.crt:ro
+  llm-3:
+    <<: *backend
+    environment: { SERVICE: llm, BACKEND_ID: llm-3 }
+    volumes:
+      - ./certs/llm.crt:/etc/backend/tls/tls.crt:ro
+      - ./certs/llm.key:/etc/backend/tls/tls.key:ro
+      - ./certs/ca.crt:/etc/backend/tls/ca.crt:ro
+  # IMPOSTOR: cert signed by rogue-ca. Gateway must reject at TLS layer.
+  llm-4:
+    <<: *backend
+    hostname: llm-4
+    environment: { SERVICE: llm, BACKEND_ID: llm-4 }
+    volumes:
+      - ./certs/rogue-llm.crt:/etc/backend/tls/tls.crt:ro
+      - ./certs/rogue-llm.key:/etc/backend/tls/tls.key:ro
+      - ./certs/rogue-ca.crt:/etc/backend/tls/ca.crt:ro
+
+  # ---- embed ----
+  embed-1:
+    <<: *backend
+    environment: { SERVICE: embed, BACKEND_ID: embed-1 }
+    volumes:
+      - ./certs/embed.crt:/etc/backend/tls/tls.crt:ro
+      - ./certs/embed.key:/etc/backend/tls/tls.key:ro
+      - ./certs/ca.crt:/etc/backend/tls/ca.crt:ro
+  embed-2:
+    <<: *backend
+    environment: { SERVICE: embed, BACKEND_ID: embed-2 }
+    volumes:
+      - ./certs/embed.crt:/etc/backend/tls/tls.crt:ro
+      - ./certs/embed.key:/etc/backend/tls/tls.key:ro
+      - ./certs/ca.crt:/etc/backend/tls/ca.crt:ro
+
+  # ---- Redis: distributed nonce cache for replay defence -------------------
+  # When redis_url is set in gateway.yaml, the gateway uses SET NX EX for
+  # replay detection — safe across multiple gateway replicas.
+  # Remove this service (and redis_url from config) to fall back to the
+  # in-process nonce cache (single-replica only).
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [ssgw]
+
+  # ---- gateway ----
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/docker/gateway.Dockerfile
+    environment:
+      GATEWAY_CONFIG: /etc/gateway/config.yaml
+    ports:
+      - "8080:8080"   # client-facing (JWT)
+      - "9090:9090"   # /metrics
+    volumes:
+      - ./config/gateway.yaml:/etc/gateway/config.yaml:ro
+      - ./certs/ca.crt:/etc/gateway/certs/ca.crt:ro
+      - ./certs/gateway.crt:/etc/gateway/certs/gateway.crt:ro
+      - ./certs/gateway.key:/etc/gateway/certs/gateway.key:ro
+    depends_on: [llm-1, llm-2, llm-3, llm-4, embed-1, embed-2, redis]
+    networks: [ssgw]
+
+  # ---- pytest test-runner (`make test`) ----
+  tests:
+    <<: *python-runner
+    volumes:
+      - ./client:/work/client:ro
+      - ./tests:/work/tests:ro
+      - ./clients:/work/clients:ro
+      - ./pytest.ini:/work/pytest.ini:ro
+      # test_04 uses docker-py to POST /admin/break inside a backend
+      # container. Comment out to skip that scenario.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: [gateway]
+    profiles: ["test"]
+
+  # ---- interactive Python shell for manual poking ----
+  # docker compose --profile shell run --rm shell -m client complete --caller analyst --prompt hi
+  shell:
+    <<: *python-runner
+    entrypoint: ["python"]
+    profiles: ["shell"]
+
+networks:
+  ssgw:
+    driver: bridge

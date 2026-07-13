@@ -1,0 +1,71 @@
+# Sample SecureServiceGateway CR.
+# Apply this after `make helm-install` to switch config management to the CR:
+#
+#   kubectl apply -f deploy/crds/sample-cr.yaml
+#   kubectl apply -f deploy/crds/sample-cr.yaml  # update -> controller reconciles
+#   kubectl get ssg -n secure-svc-gw             # check status
+#
+# The controller (cmd/controller) watches this resource, renders it into
+# the gateway-config ConfigMap, and triggers a rolling restart when the spec
+# changes. This makes every config change auditable in git and reviewable as
+# a standard Kubernetes diff.
+apiVersion: gateway.secure-svc.io/v1alpha1
+kind: SecureServiceGateway
+metadata:
+  name: main
+  namespace: secure-svc-gw
+spec:
+  # ---- JWT authentication -----------------------------------------------
+  auth:
+    issuer: secure-svc-gw
+    audience: secure-svc-gw
+    nonceTTL: 5m
+    # The controller reads this Secret and inlines the keys into gateway.yaml.
+    # To rotate a client key: update the Secret, the controller reconciles.
+    clientKeysSecretRef: gateway-client-keys
+
+  # ---- optional: HTTPS on the client-facing listener -------------------
+  # When set, the controller creates a cert-manager Certificate resource
+  # and cert-manager issues + renews the TLS cert automatically.
+  # Remove this block to keep plain HTTP.
+  # tls:
+  #   issuerRef:
+  #     name: selfsigned
+  #     kind: ClusterIssuer
+
+  # ---- backend pool configuration ---------------------------------------
+  backends:
+    namespace: ai-services           # where backend pods live
+    caSecretRef: gateway-certs       # contains ca.crt
+    clientCertSecretRef: gateway-certs  # contains tls.crt + tls.key
+    failThreshold: 3
+    passThreshold: 2
+    healthInterval: 2s
+
+  # ---- service pools -----------------------------------------------------
+  services:
+    - name: llm
+      healthPath: /healthz
+      port: 8443
+      backends: [llm-1, llm-2, llm-3, llm-4]   # llm-4 = impostor, always ejected
+    - name: embed
+      healthPath: /healthz
+      port: 8443
+      backends: [embed-1, embed-2]
+
+  # ---- routing + authorization rules ------------------------------------
+  routes:
+    - prefix: /v1/llm
+      service: llm
+      requiredScope: llm:invoke
+    - prefix: /v1/embed
+      service: embed
+      requiredScope: embed:query
+
+  # ---- network policy ---------------------------------------------------
+  # When enabled, the controller reconciles a NetworkPolicy in the backends
+  # namespace that allows ingress only from gateway pods. Requires Calico
+  # or another NetworkPolicy-aware CNI (kind-full installs Calico).
+  networkPolicy:
+    enabled: true
+    backendsPort: 8443

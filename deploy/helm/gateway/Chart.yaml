@@ -1,0 +1,9 @@
+apiVersion: v2
+name: secure-svc-gw
+description: |
+  Go reverse proxy with Ed25519 JWT auth, mTLS backend verification,
+  active health checks, and P2C load balancing. Needs the secure-svc-backends
+  chart (or equivalent) deployed in the same namespace first.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

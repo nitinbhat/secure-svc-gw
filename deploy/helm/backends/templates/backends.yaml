@@ -1,0 +1,77 @@
+{{/*
+  One Deployment + headless Service per backend replica.
+  Pod label `sgw/backend: <name>` is used by:
+    - test_04 (kubectl exec to hit /admin/break)
+    - the NetworkPolicy (implicit via component=backend)
+*/}}
+{{- range $svc := .Values.services }}
+{{- range $name := $svc.backends }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "be.labels" $ | nindent 4 }}
+    sgw/service: {{ $svc.name }}
+    sgw/backend: {{ $name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      sgw/backend: {{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "be.labels" $ | nindent 8 }}
+        sgw/service: {{ $svc.name }}
+        sgw/backend: {{ $name }}
+    spec:
+      containers:
+        - name: backend
+          image: {{ $.Values.image }}
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
+          env:
+            - name: SERVICE
+              value: {{ $svc.name }}
+            - name: BACKEND_ID
+              value: {{ $name }}
+          ports:
+            - containerPort: {{ $svc.port }}
+              name: https
+          # TCP-socket probe: the /healthz endpoint requires an mTLS client
+          # cert (kubelet can't present one via httpGet), so we settle for
+          # "TLS port is listening". Backend health from the caller's side
+          # is enforced by the gateway's own health checker over mTLS.
+          readinessProbe:
+            tcpSocket:
+              port: {{ $svc.port }}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/backend/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $svc.tlsSecret }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "be.labels" $ | nindent 4 }}
+    sgw/backend: {{ $name }}
+spec:
+  clusterIP: None
+  selector:
+    sgw/backend: {{ $name }}
+  ports:
+    - name: https
+      port: {{ $svc.port }}
+      targetPort: {{ $svc.port }}
+{{- end }}
+{{- end }}

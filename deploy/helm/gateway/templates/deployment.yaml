@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {{- include "gw.gatewayLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: secure-svc-gw
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels: {{- include "gw.gatewayLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.redis.enabled }}
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z redis 6379; do echo "waiting for redis..."; sleep 2; done']
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            - name: GATEWAY_CONFIG
+              value: /etc/gateway/config/gateway.yaml
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gateway/config
+              readOnly: true
+            - name: certs
+              mountPath: /etc/gateway/certs
+              readOnly: true
+            {{- if .Values.tls.enabled }}
+            - name: listener-tls
+              mountPath: /etc/gateway/listener-tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-config
+        - name: certs
+          secret:
+            secretName: gateway-certs
+        {{- if .Values.tls.enabled }}
+        - name: listener-tls
+          secret:
+            secretName: gateway-listener-tls
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels: {{- include "gw.gatewayLabels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/part-of: secure-svc-gw
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: 8080
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.metricsNodePort }}
+      {{- end }}

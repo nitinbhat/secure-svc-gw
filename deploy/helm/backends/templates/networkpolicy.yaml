@@ -1,0 +1,33 @@
+{{- if .Values.networkPolicy.enabled }}
+# Backend ingress is denied by default and only allowed from gateway pods
+# living in the gateway namespace. Enforced by Calico so it holds even
+# if a pod is compromised at the app layer.
+#
+# The NetworkPolicy lives in the backends namespace because that's where
+# its podSelector must resolve. The `from` clause reaches across
+# namespaces via the automatic `kubernetes.io/metadata.name` label that
+# every namespace carries in k8s >=1.22.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backends-only-from-gateway
+  labels: {{- include "be.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: secure-svc-gw
+      app.kubernetes.io/component: backend
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.gatewayNamespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: secure-svc-gw
+              app.kubernetes.io/component: gateway
+      ports:
+        - protocol: TCP
+          port: 8443
+{{- end }}

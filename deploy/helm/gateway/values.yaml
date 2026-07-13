@@ -1,0 +1,79 @@
+image: secure-svc-gw:dev
+imagePullPolicy: IfNotPresent
+replicas: 2
+
+# ---- CRD controller -----------------------------------------------------
+# When controller.enabled=true a companion Deployment is created that
+# watches SecureServiceGateway CRs and reconciles them into the gateway
+# ConfigMap + Deployment rollout annotation.
+# Disable in local/docker-compose environments where config is managed
+# directly via the ConfigMap.
+controller:
+  enabled: false
+  image: secure-svc-gw-controller:dev
+  crName: main   # name of the SecureServiceGateway CR to watch
+
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 30080
+  metricsNodePort: 30090
+
+# ---- client-facing TLS --------------------------------------------------
+# When tls.enabled=true the gateway listens on HTTPS for callers.
+# cert-manager issues the certificate from the configured issuer.
+# Set tls.enabled=false (default) to keep plain HTTP — useful for local dev.
+tls:
+  enabled: false
+  # cert-manager ClusterIssuer or Issuer name that will sign the cert.
+  # "selfsigned" uses the self-signed ClusterIssuer created by the chart.
+  issuerName: selfsigned
+  issuerKind: ClusterIssuer   # ClusterIssuer | Issuer
+  # DNS name(s) that the certificate will cover.
+  dnsNames: []                # e.g. ["gateway.example.com"]
+
+# ---- Redis nonce cache --------------------------------------------------
+# When redis.enabled=true the gateway uses Redis for distributed replay
+# defence (required for multi-replica deployments).
+# When false the gateway uses the in-process nonce cache.
+redis:
+  enabled: true
+  url: "redis://redis:6379/0"  # override with your Redis URL
+
+# ---- auth ---------------------------------------------------------------
+issuer: secure-svc-gw
+audience: secure-svc-gw
+nonceTTL: 5m
+# Populated by scripts/render-helm-secrets.sh; pass as -f clients/values-clients.yaml
+clientKeys: []
+
+# ---- routing ------------------------------------------------------------
+routes:
+  - prefix: /v1/llm
+    service: llm
+    requiredScope: llm:invoke
+  - prefix: /v1/embed
+    service: embed
+    requiredScope: embed:query
+
+# ---- backend pool -------------------------------------------------------
+# Explicit backend list so llm-4 (the rogue impostor) is always included.
+# The backends chart may live in a different namespace (typical in prod:
+# platform team runs the gateway, app teams run their own services).
+# DNS: <name>.<backendsNamespace>.svc.cluster.local
+backendsNamespace: secure-svc-gw
+services:
+  - name: llm
+    healthPath: /healthz
+    port: 8443
+    backends: [llm-1, llm-2, llm-3, llm-4]
+  - name: embed
+    healthPath: /healthz
+    port: 8443
+    backends: [embed-1, embed-2]
+
+# ---- network policy (enforced by Calico) --------------------------------
+# The NetworkPolicy actually protecting the backends lives in the backends
+# chart -- it's namespace-scoped to that side. Nothing to configure here.
+networkPolicy:
+  enabled: false

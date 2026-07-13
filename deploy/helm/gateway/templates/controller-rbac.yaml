@@ -1,0 +1,93 @@
+{{- if .Values.controller.enabled }}
+# RBAC for the SecureServiceGateway controller.
+#
+# The controller needs:
+#  - GET / LIST / WATCH on SecureServiceGateway CRs (its own group)
+#  - GET / LIST / WATCH on Secrets (to read client keys)
+#  - GET / PATCH / CREATE on ConfigMaps (to render gateway.yaml)
+#  - GET / PATCH on Deployments (to trigger rolling restart)
+#
+# Principle of least privilege: all permissions are namespace-scoped via
+# a RoleBinding, not a ClusterRoleBinding. The single ClusterRole for
+# the CRD WATCH is limited to our own API group.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secure-svc-gw-controller
+  namespace: secure-svc-gw
+  labels:
+    app.kubernetes.io/name: secure-svc-gw-controller
+    app.kubernetes.io/component: controller
+---
+# Namespace-scoped permissions inside the gateway namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secure-svc-gw-controller
+  namespace: secure-svc-gw
+rules:
+  # Read the SecureServiceGateway CR (our custom group).
+  - apiGroups: ["gateway.secure-svc.io"]
+    resources: ["secureservicegateways"]
+    verbs: ["get", "list", "watch"]
+  # Read the client-keys Secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Render and patch the gateway ConfigMap.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  # Annotate the gateway Deployment to trigger rolling restarts.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  # Create and update cert-manager Certificate resources when
+  # spec.tls.issuerRef is set in the SecureServiceGateway CR.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: secure-svc-gw-controller
+  namespace: secure-svc-gw
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: secure-svc-gw-controller
+subjects:
+  - kind: ServiceAccount
+    name: secure-svc-gw-controller
+    namespace: secure-svc-gw
+---
+# Cross-namespace permission: the controller manages the NetworkPolicy
+# that lives in the backends namespace (BE_NS), not the gateway namespace.
+# A separate Role + RoleBinding in that namespace is required because
+# Kubernetes RBAC is namespace-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secure-svc-gw-controller-netpol
+  namespace: {{ .Values.backendsNamespace }}
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: secure-svc-gw-controller-netpol
+  namespace: {{ .Values.backendsNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: secure-svc-gw-controller-netpol
+subjects:
+  - kind: ServiceAccount
+    name: secure-svc-gw-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

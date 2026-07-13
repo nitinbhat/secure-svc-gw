@@ -1,0 +1,44 @@
+{{- if .Values.tls.enabled }}
+---
+# Self-signed ClusterIssuer — only created when issuerName == "selfsigned".
+# For production, point tls.issuerName at your real cert-manager issuer
+# (Let's Encrypt, Vault, etc.) and remove this block.
+{{- if eq .Values.tls.issuerName "selfsigned" }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+  labels: {{- include "gw.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+---
+# Certificate for the gateway's client-facing HTTPS listener.
+# cert-manager will create the Secret "gateway-listener-tls" and rotate it
+# before expiry; the gateway pod picks up the new cert on next restart
+# (or via an init-container / sidecar that watches for Secret changes).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gateway-listener-tls
+  labels: {{- include "gw.labels" . | nindent 4 }}
+spec:
+  secretName: gateway-listener-tls
+  duration: 2160h      # 90 days
+  renewBefore: 360h    # renew 15 days before expiry
+  issuerRef:
+    name: {{ .Values.tls.issuerName }}
+    kind: {{ .Values.tls.issuerKind }}
+  {{- if .Values.tls.dnsNames }}
+  dnsNames:
+    {{- range .Values.tls.dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- else }}
+  # No dnsNames given — generate a cert with just the service DNS name.
+  # This is fine for internal use and for kind local testing.
+  dnsNames:
+    - gateway.{{ .Release.Namespace }}.svc.cluster.local
+    - gateway
+  {{- end }}
+{{- end }}

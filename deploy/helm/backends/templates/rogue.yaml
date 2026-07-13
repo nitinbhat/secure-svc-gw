@@ -1,0 +1,64 @@
+{{- if .Values.rogue.enabled }}
+{{- $r := .Values.rogue }}
+---
+# Rogue impostor -- same app code as a legit llm replica but its TLS
+# cert (backend-rogue-tls) is signed by rogue-ca, not the secure-svc-gw CA.
+# The gateway probes it every 2s, the TLS handshake fails at CA verify,
+# and it never enters the healthy pool. This is the spoofed-backend demo.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $r.name }}
+  labels:
+    {{- include "be.labels" $ | nindent 4 }}
+    sgw/service: {{ $r.service }}
+    sgw/backend: {{ $r.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      sgw/backend: {{ $r.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "be.labels" $ | nindent 8 }}
+        sgw/service: {{ $r.service }}
+        sgw/backend: {{ $r.name }}
+    spec:
+      containers:
+        - name: backend
+          image: {{ $.Values.image }}
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
+          env:
+            - name: SERVICE
+              value: {{ $r.service }}
+            - name: BACKEND_ID
+              value: {{ $r.name }}
+          ports:
+            - containerPort: {{ $r.port }}
+              name: https
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/backend/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $r.tlsSecret }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $r.name }}
+  labels:
+    {{- include "be.labels" $ | nindent 4 }}
+    sgw/backend: {{ $r.name }}
+spec:
+  clusterIP: None
+  selector:
+    sgw/backend: {{ $r.name }}
+  ports:
+    - name: https
+      port: {{ $r.port }}
+      targetPort: {{ $r.port }}
+{{- end }}

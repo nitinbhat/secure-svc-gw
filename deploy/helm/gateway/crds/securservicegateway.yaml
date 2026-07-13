@@ -1,0 +1,160 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: secureservicegateways.gateway.secure-svc.io
+  # Helm manages this via the crds/ directory — it is applied before any
+  # other chart resources and is never deleted on `helm uninstall`.
+  annotations:
+    controller-gen.kubebuilder.io/version: "manual"
+spec:
+  group: gateway.secure-svc.io
+  scope: Namespaced
+  names:
+    plural:   secureservicegateways
+    singular: secureservicegateway
+    kind:     SecureServiceGateway
+    shortNames: [ssg]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Namespace
+          type: string
+          jsonPath: .spec.backends.namespace
+        - name: Redis
+          type: string
+          jsonPath: .spec.redis.url
+        - name: TLS
+          type: string
+          jsonPath: .spec.tls.secretRef
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [auth, backends, services, routes]
+              properties:
+
+                # ---- auth ------------------------------------------------
+                auth:
+                  type: object
+                  required: [issuer, audience, nonceTTL, clientKeysSecretRef]
+                  properties:
+                    issuer:
+                      type: string
+                      description: Expected `iss` JWT claim.
+                    audience:
+                      type: string
+                      description: Expected `aud` JWT claim.
+                    nonceTTL:
+                      type: string
+                      description: Replay-prevention window, e.g. "5m".
+                      pattern: '^[0-9]+(s|m|h)$'
+                    clientKeysSecretRef:
+                      type: string
+                      description: >
+                        Name of a Secret whose keys are client IDs and
+                        values are JSON-encoded ClientKey objects
+                        (kid, pub, sub, scopes).
+
+                # ---- optional TLS ----------------------------------------
+                tls:
+                  type: object
+                  properties:
+                    secretRef:
+                      type: string
+                      description: Name of an existing TLS Secret.
+                    issuerRef:
+                      type: object
+                      required: [name, kind]
+                      properties:
+                        name:
+                          type: string
+                        kind:
+                          type: string
+                          enum: [Issuer, ClusterIssuer]
+
+                # ---- backends --------------------------------------------
+                backends:
+                  type: object
+                  required: [namespace, caSecretRef, clientCertSecretRef]
+                  properties:
+                    namespace:
+                      type: string
+                      description: Namespace where the backend pods live.
+                    caSecretRef:
+                      type: string
+                      description: Secret containing the trusted CA cert (ca.crt).
+                    clientCertSecretRef:
+                      type: string
+                      description: Secret with the gateway's mTLS client cert.
+                    failThreshold:
+                      type: integer
+                      default: 3
+                      minimum: 1
+                    passThreshold:
+                      type: integer
+                      default: 2
+                      minimum: 1
+                    healthInterval:
+                      type: string
+                      default: "2s"
+                      pattern: '^[0-9]+(s|m)$'
+
+                # ---- services --------------------------------------------
+                services:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [name, backends]
+                    properties:
+                      name:
+                        type: string
+                      healthPath:
+                        type: string
+                        default: "/healthz"
+                      port:
+                        type: integer
+                        default: 8443
+                      backends:
+                        type: array
+                        items:
+                          type: string
+
+                # ---- routes ----------------------------------------------
+                routes:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [prefix, service]
+                    properties:
+                      prefix:
+                        type: string
+                      service:
+                        type: string
+                      requiredScope:
+                        type: string
+
+                # ---- networkPolicy ----------------------------------------
+                networkPolicy:
+                  type: object
+                  description: >
+                    Controls the Kubernetes NetworkPolicy the controller
+                    reconciles in the backends namespace. When enabled, only
+                    gateway pods may reach backend pods on the mTLS port.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    backendsPort:
+                      type: integer
+                      default: 8443
+                      description: TCP port to allow from the gateway.
