@@ -247,24 +247,20 @@ venv:  ## create .venv and install pytest deps (used by test-kind)
 
 .PHONY: test-kind
 test-kind: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce tests
-	@GW_PORT=18080; \
-	METRICS_PORT=19090; \
-	echo "port-forwarding gateway 8080 + 9090 (from $(GW_NS)) to localhost:$$GW_PORT/$$METRICS_PORT (background)..."; \
-	$(KUBECTL) -n $(GW_NS) port-forward svc/gateway $$GW_PORT:8080 $$METRICS_PORT:9090 & \
-	PF_PID=$$!; \
-	sleep 3; \
-	GATEWAY_URL=http://localhost:$$GW_PORT \
-	METRICS_URL=http://localhost:$$METRICS_PORT \
-	CLIENTS_DIR=clients \
-	KUBE_NAMESPACE=$(BE_NS) \
-	REDIS_NAMESPACE=$(GW_NS) \
-	GATEWAY_USES_REDIS=$(REDIS) \
-	.venv/bin/python -m pytest tests/ -v $(TEST_ARGS); \
-	STATUS=$$?; \
-	kill $$PF_PID 2>/dev/null; \
-	wait $$PF_PID 2>/dev/null; \
-	pkill -f "kubectl.*port-forward.*gateway" 2>/dev/null; \
-	exit $$STATUS
+	@bash -euo pipefail -c '\
+	  GW_PORT=18080; METRICS_PORT=19090; \
+	  echo "port-forwarding gateway 8080+9090 to localhost:$$GW_PORT/$$METRICS_PORT..."; \
+	  $(KUBECTL) -n $(GW_NS) port-forward svc/gateway $$GW_PORT:8080 $$METRICS_PORT:9090 & PF_PID=$$!; \
+	  trap "kill $$PF_PID 2>/dev/null; wait $$PF_PID 2>/dev/null" EXIT; \
+	  sleep 3; \
+	  GATEWAY_URL=http://localhost:$$GW_PORT \
+	  METRICS_URL=http://localhost:$$METRICS_PORT \
+	  CLIENTS_DIR=clients \
+	  KUBE_NAMESPACE=$(BE_NS) \
+	  REDIS_NAMESPACE=$(GW_NS) \
+	  GATEWAY_USES_REDIS=$(REDIS) \
+	  .venv/bin/python -m pytest tests/ -v $(TEST_ARGS); \
+	'
 
 .PHONY: test-kind-tls
 test-kind-tls: venv  ## pytest via port-forward with gateway TLS enabled (includes test_08)
@@ -287,8 +283,6 @@ test-kind-tls: venv  ## pytest via port-forward with gateway TLS enabled (includ
 	REQUESTS_CA_BUNDLE=$$TMP_CA \
 	.venv/bin/python -m pytest tests/ -v $(TEST_ARGS); \
 	STATUS=$$?; \
-	kill $$PF_PID 2>/dev/null; \
-	wait $$PF_PID 2>/dev/null; \
-	pkill -f "kubectl.*port-forward.*gateway" 2>/dev/null; \
+	kill $$PF_PID 2>/dev/null; wait $$PF_PID 2>/dev/null; \
 	rm -f $$TMP_CA; \
 	exit $$STATUS
