@@ -88,7 +88,7 @@ toolchain, no Docker build. Prefer to build the images locally instead? Run
 
 ```mermaid
 flowchart TD
-    REQ["HTTP request from caller"] --> ROUTE
+    REQ["HTTPS request from caller\n(HTTP if listener TLS disabled)"] --> ROUTE
 
     ROUTE["1. ROUTE MATCH\nprefix → {service, scope}"]
     ROUTE -- "no match" --> E404["404 no route"]
