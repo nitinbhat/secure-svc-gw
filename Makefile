@@ -1,16 +1,24 @@
 # Secure Service Gateway -- Makefile
 #
-# Docker Compose (fastest, no cluster needed):
+# ---- One-command demos ----
+#
+#   make demo            pull GHCR images + compose up + test + HTML report  (Docker only)
+#   make container       build images locally + compose up + test + HTML report
+#
+#   make demo-k8s        kind cluster + pull from GHCR + helm + test + HTML report  (no build)
+#   make k8s             build locally + kind cluster + helm + test + HTML report
+#
+# ---- Step-by-step (compose) ----
 #
 #   make certs && make up && make test
 #
-# Kind cluster (mirrors production topology with Calico NetworkPolicy):
+# ---- Step-by-step (kind) ----
 #
-#   make kind-up
+#   make k8s-up
 #   make images-load
-#   make helm-install-backends   # llm-1..3, embed-1..2, rogue llm-4
-#   make helm-install-gateway    # gateway + config + networkpolicy
-#   make test-kind               # pytest via port-forward; uses kubectl exec for test_04
+#   make helm-install-backends
+#   make helm-install-gateway
+#   make test-k8s
 
 GO      ?= go
 DOCKER  ?= docker
@@ -87,37 +95,53 @@ report:
 	@echo "HTML report: reports/compose-report.html  (open in browser)"
 
 .PHONY: demo
-demo: down certs up  ## full cycle: certs + up  (run 'make test' or 'make test-kind' for pytest)
-	@echo "waiting 5s for backends to warm up..." && sleep 5
+demo: down certs  ## pull GHCR images + compose up (no build) + test + HTML report
+	@echo "=== demo: pulling pre-built images from GHCR ==="
+	$(COMPOSE) pull gateway llm-1
+	$(COMPOSE) up -d
+	@printf "\nwaiting 5 s for backends to warm up...\n" && sleep 5
 	@curl -sf http://localhost:9090/metrics -o /dev/null \
 		&& echo "smoke: gateway metrics OK" \
 		|| echo "smoke: WARNING — metrics endpoint not reachable yet"
-	@echo "  gateway: http://localhost:8080   metrics: http://localhost:9090/metrics"
-	@echo "  compose tests:  make test"
-	@echo "  kind tests:      make test-kind"
+	$(MAKE) report
 
-# ---- repeatable demo targets ------------------------------------------------
-# (a) Full local build: compile, cluster, install, configure via CR, test.
-#     Requires: go, docker, kind, helm, kubectl.  Takes ~10 min on first run.
-.PHONY: demo-local
-demo-local:  ## BUILD + cluster + install + CR + controller + test (fully local, no registry)
-	@echo "=== demo-local: full local build, install, and test ==="
-	$(MAKE) kind-down 2>/dev/null || true
-	$(MAKE) kind-full \
+.PHONY: container
+container: down certs  ## build images locally + compose up + test + HTML report
+	@echo "=== container: building images locally ==="
+	$(COMPOSE) up --build -d
+	@printf "\nwaiting 5 s for backends to warm up...\n" && sleep 5
+	@curl -sf http://localhost:9090/metrics -o /dev/null \
+		&& echo "smoke: gateway metrics OK" \
+		|| echo "smoke: WARNING — metrics endpoint not reachable yet"
+	$(MAKE) report
+
+# ---- one-command k8s demos ------------------------------------------------
+# (a) Build locally: compile, create cluster, install, test + report.
+#     Requires: go, docker, kind, helm, kubectl.
+.PHONY: k8s
+k8s:  ## build locally + kind cluster + helm install + tests + HTML report
+	@echo "=== k8s: build locally, install on kind, run tests ==="
+	$(MAKE) k8s-down 2>/dev/null || true
+	$(MAKE) k8s-up
+	$(MAKE) certs
+	$(MAKE) images-load
+	$(MAKE) helm-install-backends
+	$(MAKE) helm-install-gateway \
 		GATEWAY_EXTRA_SET="--set redis.enabled=true --set controller.enabled=true"
+	$(MAKE) report-k8s REDIS=1
 
-# (b) GHCR pull: create cluster, pull pre-built images from GHCR, install, configure via CR, test.
-#     Requires: docker, kind, helm, kubectl.  No Go toolchain needed.
-.PHONY: demo-ghcr
-demo-ghcr: _check-ports  ## cluster + pull from GHCR + install + CR + controller + test (no local build)
-	@echo "=== demo-ghcr: pull images from GHCR, install, and test ==="
-	bash deploy/kind/up.sh $(CLUSTER)
+# (b) GHCR pull: create cluster, pull pre-built images, install, test + report.
+#     Requires: docker, kind, helm, kubectl.  No Go toolchain or Docker build needed.
+.PHONY: demo-k8s
+demo-k8s: _check-ports  ## kind cluster + pull from GHCR + helm install + tests + HTML report (no build)
+	@echo "=== demo-k8s: pull images from GHCR, install on kind, run tests ==="
+	$(MAKE) k8s-up
 	$(MAKE) certs
 	$(MAKE) images-pull
 	$(MAKE) helm-install-backends
 	$(MAKE) helm-install-gateway \
 		GATEWAY_EXTRA_SET="--set redis.enabled=true --set controller.enabled=true"
-	$(MAKE) test-kind REDIS=1
+	$(MAKE) report-k8s REDIS=1
 
 .PHONY: chat
 chat:  ## one analyst completion call
@@ -136,12 +160,12 @@ _check-ports:
 	PORT_9090=$$(lsof -Pi :9090 -sTCP:LISTEN -t 2>/dev/null || echo ""); \
 	if [ -n "$$PORT_8080" ] || [ -n "$$PORT_9090" ]; then \
 		echo "ERROR: required ports are already in use:"; \
-		[ -n "$$PORT_8080" ] && echo "  port 8080  (PID $$PORT_8080) — Docker Compose or stale kind container"; \
-		[ -n "$$PORT_9090" ] && echo "  port 9090  (PID $$PORT_9090) — Docker Compose or stale kind container"; \
+		[ -n "$$PORT_8080" ] && echo "  port 8080  (PID $$PORT_8080) — Docker Compose or stale k8s container"; \
+		[ -n "$$PORT_9090" ] && echo "  port 9090  (PID $$PORT_9090) — Docker Compose or stale k8s container"; \
 		echo ""; \
 		echo "  Run this to clean up:"; \
 		echo "    make clean        # stop compose + remove stale kind clusters"; \
-		echo "    make kind-reset   # full teardown + rebuild"; \
+		echo "    make k8s-reset    # full teardown + rebuild"; \
 		exit 1; \
 	fi
 
@@ -153,36 +177,36 @@ clean: down  ## stop compose AND remove any stale kind cluster/container
 	@echo "ports 8080/9090 should now be free"
 
 # ---- kind cluster --------------------------------------------------------
-.PHONY: kind-up
-kind-up: _check-ports  ## create 2-node kind cluster + Calico CNI + cert-manager
+.PHONY: k8s-up
+k8s-up: _check-ports  ## create 2-node kind cluster + Calico CNI + cert-manager
 	bash deploy/kind/up.sh $(CLUSTER)
 
-.PHONY: kind-down
-kind-down:  ## delete the kind cluster
+.PHONY: k8s-down
+k8s-down:  ## delete the kind cluster
 	$(KIND) delete cluster --name $(CLUSTER)
 
 # One-shot: full kind setup + pytest with Redis and TLS enabled.
-# This is what the CI integration job and 'make kind-full' run.
+# This is what the CI integration job and 'make k8s-full' run.
 # Override REDIS=0 or TLS=0 to disable.
 REDIS ?= 1
 TLS   ?= 0
 
-.PHONY: kind-full
-kind-full: kind-up certs images-load  ## full kind setup: cluster + Calico + cert-manager + Redis + helm + pytest
+.PHONY: k8s-full
+k8s-full: k8s-up certs images-load  ## full kind setup: cluster + Calico + cert-manager + Redis + helm + pytest
 	$(MAKE) helm-install-backends
 	$(MAKE) helm-install-gateway \
 		GATEWAY_EXTRA_SET="$(if $(filter 1,$(REDIS)),--set redis.enabled=true) $(if $(filter 1,$(TLS)),--set tls.enabled=true)"
-	$(MAKE) test-kind REDIS=$(REDIS)
+	$(MAKE) test-k8s REDIS=$(REDIS)
 
-.PHONY: kind-full-tls
-kind-full-tls: kind-up certs images-load  ## full kind setup WITH gateway TLS enabled (includes test_08)
+.PHONY: k8s-tls
+k8s-tls: k8s-up certs images-load  ## full kind setup WITH gateway TLS enabled (includes test_08)
 	$(MAKE) helm-install-backends
 	$(MAKE) helm-install-gateway \
 		GATEWAY_EXTRA_SET="--set tls.enabled=true --set tls.dnsNames={localhost} $(if $(filter 1,$(REDIS)),--set redis.enabled=true)"
-	$(MAKE) test-kind-tls REDIS=$(REDIS)
+	$(MAKE) test-k8s-tls REDIS=$(REDIS)
 
-.PHONY: kind-reset
-kind-reset: kind-down kind-full  ## tear down + rebuild from scratch
+.PHONY: k8s-reset
+k8s-reset: k8s-down k8s-full  ## tear down + rebuild from scratch
 
 # ---- build + load images into kind --------------------------------------
 .PHONY: images-load
@@ -256,11 +280,11 @@ helm-uninstall:  ## remove both releases + namespaces
 
 # ---- test against the kind cluster --------------------------------------
 .PHONY: venv
-venv:  ## create .venv and install pytest deps (used by test-kind)
+venv:  ## create .venv and install pytest deps (used by test-k8s)
 	@test -x .venv/bin/pytest || (python3 -m venv .venv && .venv/bin/pip install -q -r tests/requirements.txt)
 
-.PHONY: test-kind
-test-kind: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce tests
+.PHONY: test-k8s
+test-k8s: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce tests
 	@bash -c '\
 	  GW_PORT=18080; METRICS_PORT=19090; \
 	  echo "port-forwarding gateway 8080+9090 to localhost:$$GW_PORT/$$METRICS_PORT..."; \
@@ -278,8 +302,8 @@ test-kind: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce t
 	  exit $$STATUS; \
 	'
 
-.PHONY: report-kind  ## run full kind test suite + generate HTML report at reports/kind-report.html
-report-kind: venv
+.PHONY: report-k8s  ## run full kind test suite + generate HTML report at reports/kind-report.html
+report-k8s: venv
 	@mkdir -p reports
 	@bash -c '\
 	  GW_PORT=18080; METRICS_PORT=19090; \
@@ -303,8 +327,8 @@ report-kind: venv
 	@echo ""
 	@echo "HTML report: reports/kind-report.html  (open in browser)"
 
-.PHONY: test-kind-tls
-test-kind-tls: venv  ## pytest via port-forward with gateway TLS enabled (includes test_08)
+.PHONY: test-k8s-tls
+test-k8s-tls: venv  ## pytest via port-forward with gateway TLS enabled (includes test_08)
 	@GW_PORT=18080; \
 	METRICS_PORT=19090; \
 	TMP_CA=$$(mktemp); \

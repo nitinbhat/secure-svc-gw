@@ -63,7 +63,7 @@ ghcr.io/nitinbhat/secure-svc-gw-controller:latest
 ```
 
 ```bash
-make demo-ghcr
+make demo-k8s
 ```
 
 Creates a 2-node kind cluster with Calico CNI and cert-manager, pulls the
@@ -72,13 +72,13 @@ three images from GHCR, installs the Helm charts, applies the
 No compiler, no Go toolchain, no Docker build.
 
 ```bash
-make demo-ghcr && make report-kind   # adds reports/kind-report.html
+make demo-k8s   # includes report — reports/kind-report.html generated automatically
 ```
 
 #### Build locally (no registry needed)
 
 ```bash
-make demo-local
+make k8s
 ```
 
 Same as above but builds `secure-svc-gw:dev`, `secure-svc-backend:dev`, and
@@ -233,40 +233,40 @@ make down
 One command does everything:
 
 ```bash
-make kind-full
+make k8s-full
 ```
 
 Expands to:
 
 | Step | Command run internally | What it does |
 |---|---|---|
-| 1 | `make kind-up` | Creates 2-node kind cluster, installs Calico CNI, installs cert-manager v1.16.3 |
+| 1 | `make k8s-up` | Creates 2-node kind cluster, installs Calico CNI, installs cert-manager v1.16.3 |
 | 2 | `make certs` | Generates CA, TLS certs, Ed25519 client keys |
 | 3 | `make images-load` | Builds `secure-svc-gw:dev` and `secure-svc-backend:dev`, loads into kind |
 | 4 | `make helm-install-backends` | Deploys `llm-{1,2,3,4}` + `embed-{1,2}` + NetworkPolicy into `ai-services` |
 | 5 | `make helm-install-gateway` | Deploys gateway + Redis into `secure-svc-gw` |
-| 6 | `make test-kind REDIS=1` | `kubectl port-forward` 8080/9090, runs full pytest suite |
+| 6 | `make test-k8s REDIS=1` | `kubectl port-forward` 8080/9090, runs full pytest suite |
 
 Flags:
 
 ```bash
-make kind-full                  # defaults: REDIS=1, TLS=0
-make kind-full REDIS=0          # in-memory nonce cache (test_07 skipped)
-make kind-full TLS=1            # also enable HTTPS listener (cert-manager issues cert)
+make k8s-full                  # defaults: REDIS=1, TLS=0
+make k8s-full REDIS=0          # in-memory nonce cache (test_07 skipped)
+make k8s-full TLS=1            # also enable HTTPS listener (cert-manager issues cert)
 ```
 
 Run only the tests against an already-running cluster:
 
 ```bash
-make test-kind          # without Redis nonce tests
-make test-kind REDIS=1  # with Redis nonce tests (test_07)
+make test-k8s          # without Redis nonce tests
+make test-k8s REDIS=1  # with Redis nonce tests (test_07)
 ```
 
 Tear down:
 
 ```bash
-make kind-down    # delete the kind cluster
-make kind-reset   # delete + rebuild from scratch (kind-down + kind-full)
+make k8s-down    # delete the kind cluster
+make k8s-reset   # delete + rebuild from scratch (k8s-down + k8s-full)
 ```
 
 ---
@@ -291,7 +291,7 @@ go test -fuzz=FuzzVerify -fuzztime=30s ./internal/auth/...
 make test
 
 # integration — kind cluster (port-forward + kubectl exec)
-make test-kind
+make test-k8s
 
 # single file or test
 docker compose --profile test run --rm tests -k test_07_redis_restart
@@ -521,8 +521,8 @@ every configured backend including the impostor.
 |---|---|---|
 | `unit` | every push + PR | no — Go tests only |
 | `build-push` | every push + PR | **yes, on `main` only** — pushes `:latest` and `:<git-sha>` to GHCR |
-| `smoke` | every push + PR | no — compose up + curl check only |
-| `integration-kind` | `main` pushes only | no — consumes images that `build-push` just pushed |
+| `smoke` | every push + PR (after `build-push`) | no — `make demo`: pull GHCR images + compose + full pytest |
+| `integration-k8s` | `main` pushes only | no — kind cluster + GHCR pull + helm + full pytest |
 
 PRs build images but do **not** push them. Only merging to `main` publishes to the registry.
 
@@ -534,7 +534,7 @@ GHCR packages are **private by default**. After the first push:
 2. Open `secure-svc-gw` and `secure-svc-backend`
 3. Package settings → **Change visibility → Public**
 
-Once public, `make images-pull` and `make kind-full` (via `images-pull`) work for anyone without authentication.
+Once public, `make images-pull` and `make demo-k8s` work for anyone without authentication.
 
 ### Push images manually
 
@@ -554,7 +554,7 @@ Images land at:
 
 ## Kind + Calico + Helm deployment
 
-### What `make kind-up` installs
+### What `make k8s-up` installs
 
 | Component | How | Why |
 |---|---|---|
@@ -569,23 +569,23 @@ Images land at:
 ### One-shot (recommended)
 
 ```bash
-make kind-full
+make k8s-full
 ```
 
-This single target does everything: `kind-up` → `certs` → `images-load` → `helm-install-backends` → `helm-install-gateway --set redis.enabled=true` → `test-kind REDIS=1`.
+This single target does everything: `k8s-up` → `certs` → `images-load` → `helm-install-backends` → `helm-install-gateway --set redis.enabled=true` → `test-k8s REDIS=1`.
 
 Redis and TLS are flags:
 
 ```bash
-make kind-full REDIS=1 TLS=1   # Redis + HTTPS listener (default: REDIS=1, TLS=0)
-make kind-full REDIS=0          # in-memory nonce cache only (skips test_07)
+make k8s-full REDIS=1 TLS=1   # Redis + HTTPS listener (default: REDIS=1, TLS=0)
+make k8s-full REDIS=0          # in-memory nonce cache only (skips test_07)
 ```
 
 ### Step by step (for reference)
 
 ```bash
 # 1. Kind cluster — Calico CNI + cert-manager v1.16.3
-make kind-up
+make k8s-up
 
 # 2. Generate CA, TLS certs, Ed25519 client keys
 make certs
@@ -602,7 +602,7 @@ make helm-install-gateway GATEWAY_EXTRA_SET="--set redis.enabled=true"
 
 # 6. Run the full pytest suite
 #    REDIS=1 unlocks test_07 (Redis fail-closed + recovery)
-make test-kind REDIS=1
+make test-k8s REDIS=1
 ```
 
 Pull from GHCR instead of building locally (skip step 2-3, pull images CI just pushed):
@@ -616,9 +616,9 @@ Tear down:
 
 ```bash
 make helm-uninstall   # removes both Helm releases + namespaces
-make kind-down        # deletes the kind cluster
+make k8s-down         # deletes the kind cluster
 # or in one shot:
-make kind-reset       # kind-down + kind-full
+make k8s-reset        # k8s-down + k8s-full
 ```
 
 ### What runs in each pytest file and when
