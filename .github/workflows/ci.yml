@@ -121,6 +121,14 @@ jobs:
       - name: make demo (pull GHCR images + compose up + pytest)
         run: make demo
 
+      - name: Upload compose HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-test-report
+          path: reports/compose-report.html
+          if-no-files-found: warn
+
       - name: make down
         if: always()
         run: make down
@@ -173,8 +181,16 @@ jobs:
           make helm-install-gateway \
             GATEWAY_EXTRA_SET="--set redis.enabled=true --set controller.enabled=true"
 
-      - name: Full pytest suite (Redis enabled)
-        run: make test-k8s REDIS=1
+      - name: Full pytest suite (Redis enabled) + HTML report
+        run: make report-k8s REDIS=1
+
+      - name: Upload kind HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-test-report
+          path: reports/kind-report.html
+          if-no-files-found: warn
 
       - name: k8s-down
         if: always()

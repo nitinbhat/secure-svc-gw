@@ -522,9 +522,18 @@ every configured backend including the impostor.
 | `unit` | every push + PR | no — Go tests only |
 | `build-push` | every push + PR | **yes, on `main` only** — pushes `:latest` and `:<git-sha>` to GHCR |
 | `smoke` | every push + PR (after `build-push`) | no — `make demo`: pull GHCR images + compose + full pytest |
-| `integration-k8s` | `main` pushes only | no — kind cluster + GHCR pull + helm + full pytest |
+| `integration-kind` | `main` pushes only | no — kind cluster + GHCR pull + helm + full pytest |
 
 PRs build images but do **not** push them. Only merging to `main` publishes to the registry.
+
+### Downloading the HTML test report from CI
+
+Both the `smoke` and `integration-kind` jobs upload their pytest HTML report as a build artifact (kept 90 days by default), even if tests fail:
+
+- `smoke` → **compose-test-report** (`compose-report.html`)
+- `integration-kind` → **kind-test-report** (`kind-report.html`)
+
+To grab one: open the workflow run on the **Actions** tab → scroll to the **Artifacts** section at the bottom of the run summary → download the zip and open the `.html` file in a browser. Via the CLI: `gh run download <run-id> -n kind-test-report`.
 
 ### First-time GHCR setup
 
