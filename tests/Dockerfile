@@ -10,6 +10,9 @@ WORKDIR /work
 COPY tests/requirements.txt /tmp/req.txt
 RUN pip install --no-cache-dir -r /tmp/req.txt
 
+# Create reports dir so it exists inside the image too (host bind-mount wins at runtime)
+RUN mkdir -p /work/reports
+
 # Source is bind-mounted at runtime so edits are picked up without rebuild.
 # But we also copy on build for `docker compose run` ergonomics.
 COPY client /work/client

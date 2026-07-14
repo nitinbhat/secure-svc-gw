@@ -72,6 +72,20 @@ test:
 	$(COMPOSE) --profile test build tests
 	$(COMPOSE) --profile test run --rm tests
 
+.PHONY: report  ## run pytest in compose network + generate HTML report at reports/compose-report.html
+report:
+	mkdir -p reports
+	$(COMPOSE) --profile test build tests
+	$(COMPOSE) --profile test run --rm \
+		-e REPORT_ENV="Docker Compose" \
+		-e GATEWAY_URL="http://gateway:8080" \
+		-e METRICS_URL="http://gateway:9090" \
+		tests \
+		pytest tests/ -v --tb=short \
+		  --html=/work/reports/compose-report.html --self-contained-html || true
+	@echo ""
+	@echo "HTML report: reports/compose-report.html  (open in browser)"
+
 .PHONY: demo
 demo: down certs up  ## full cycle: certs + up  (run 'make test' or 'make test-kind' for pytest)
 	@echo "waiting 5s for backends to warm up..." && sleep 5
@@ -263,6 +277,31 @@ test-kind: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce t
 	  kill $$PF_PID 2>/dev/null; wait $$PF_PID 2>/dev/null; \
 	  exit $$STATUS; \
 	'
+
+.PHONY: report-kind  ## run full kind test suite + generate HTML report at reports/kind-report.html
+report-kind: venv
+	@mkdir -p reports
+	@bash -c '\
+	  GW_PORT=18080; METRICS_PORT=19090; \
+	  echo "port-forwarding gateway 8080+9090..."; \
+	  $(KUBECTL) -n $(GW_NS) port-forward svc/gateway $$GW_PORT:8080 $$METRICS_PORT:9090 & PF_PID=$$!; \
+	  sleep 3; \
+	  GATEWAY_URL=http://localhost:$$GW_PORT \
+	  METRICS_URL=http://localhost:$$METRICS_PORT \
+	  CLIENTS_DIR=clients \
+	  KUBE_NAMESPACE=$(BE_NS) \
+	  REDIS_NAMESPACE=$(GW_NS) \
+	  GATEWAY_USES_REDIS=$(REDIS) \
+	  REPORT_ENV="Kind / Kubernetes" \
+	  .venv/bin/python -m pytest tests/ -v \
+	    --html=reports/kind-report.html --self-contained-html \
+	    $(TEST_ARGS); \
+	  STATUS=$$?; \
+	  kill $$PF_PID 2>/dev/null; wait $$PF_PID 2>/dev/null; \
+	  exit $$STATUS; \
+	'
+	@echo ""
+	@echo "HTML report: reports/kind-report.html  (open in browser)"
 
 .PHONY: test-kind-tls
 test-kind-tls: venv  ## pytest via port-forward with gateway TLS enabled (includes test_08)

@@ -126,7 +126,7 @@ services:
     depends_on: [llm-1, llm-2, llm-3, llm-4, embed-1, embed-2, redis]
     networks: [ssgw]
 
-  # ---- pytest test-runner (`make test`) ----
+  # ---- pytest test-runner (`make test` / `make report`) ----
   tests:
     <<: *python-runner
     volumes:
@@ -134,6 +134,7 @@ services:
       - ./tests:/work/tests:ro
       - ./clients:/work/clients:ro
       - ./pytest.ini:/work/pytest.ini:ro
+      - ./reports:/work/reports
       # test_04 uses docker-py to POST /admin/break inside a backend
       # container. Comment out to skip that scenario.
       - /var/run/docker.sock:/var/run/docker.sock
