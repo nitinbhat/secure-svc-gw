@@ -30,7 +30,7 @@
 
 x-backend: &backend
   build: ./backend
-  image: ghcr.io/nitinbhat/secure-svc-backend:latest
+  image: ghcr.io/nitinbhat/secure-svc-backend:${IMAGE_TAG:-latest}
   restart: unless-stopped
   networks: [ssgw]
 
@@ -117,7 +117,7 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/gateway.Dockerfile
-    image: ghcr.io/nitinbhat/secure-svc-gw:latest
+    image: ghcr.io/nitinbhat/secure-svc-gw:${IMAGE_TAG:-latest}
     environment:
       GATEWAY_CONFIG: /etc/gateway/config.yaml
     ports:
