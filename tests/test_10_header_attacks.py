@@ -17,7 +17,9 @@ Attacks covered:
 """
 from __future__ import annotations
 
+import os
 import socket
+import ssl
 
 import pytest
 import requests
@@ -29,18 +31,20 @@ from tests.conftest import GATEWAY_URL, narrate
 _POST_PATH = "/v1/llm/completions"
 _JSON_BODY = b'{"prompt":"hi"}'
 _SAFE_CODES = {400, 401, 403, 404}
+_TLS_CA_CERT = os.getenv("TLS_CA_CERT")
 
 
 def _raw_post(headers: list[tuple[str, str]], body: bytes = _JSON_BODY) -> int:
     """Send a raw HTTP/1.1 POST and return the status code.
 
-    Uses a raw socket so we can craft headers that requests.Session would
-    normalise away (e.g. duplicate headers, null bytes).
+    Uses a raw socket (wrapped in TLS when the gateway serves HTTPS) so we
+    can craft headers that requests.Session would normalise away (e.g.
+    duplicate headers, null bytes).
     """
     from urllib.parse import urlparse
     p = urlparse(GATEWAY_URL)
     host = p.hostname
-    port = p.port or 80
+    port = p.port or (443 if p.scheme == "https" else 80)
 
     lines = [f"POST {_POST_PATH} HTTP/1.1"]
     lines.append(f"Host: {host}:{port}")
@@ -53,7 +57,16 @@ def _raw_post(headers: list[tuple[str, str]], body: bytes = _JSON_BODY) -> int:
     lines.append("")
     request = "\r\n".join(lines).encode() + body
 
-    with socket.create_connection((host, port), timeout=5) as s:
+    with socket.create_connection((host, port), timeout=5) as raw:
+        if p.scheme == "https":
+            ctx = (
+                ssl.create_default_context(cafile=_TLS_CA_CERT)
+                if _TLS_CA_CERT and os.path.exists(_TLS_CA_CERT)
+                else ssl.create_default_context()
+            )
+            s = ctx.wrap_socket(raw, server_hostname=host)
+        else:
+            s = raw
         s.sendall(request)
         response = b""
         while True:

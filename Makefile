@@ -61,7 +61,8 @@ certs: build  ## generate CA, certs, Ed25519 client keys, gateway.yaml
 .PHONY: up
 up: certs  ## docker compose up --build
 	$(COMPOSE) up --build -d
-	@printf "\ngateway: http://localhost:8080   metrics: http://localhost:9090/metrics\n"
+	@printf "\ngateway: https://localhost:8080 (self-signed, CA at certs/ca.crt)   metrics: http://localhost:9090/metrics\n"
+	@printf "try: curl --cacert certs/ca.crt https://localhost:8080/v1/llm/completions\n"
 
 .PHONY: down
 down:  ## docker compose down -v (brings down all services regardless of profile)
@@ -86,7 +87,7 @@ report:
 	$(COMPOSE) --profile test build tests
 	$(COMPOSE) --profile test run --rm \
 		-e REPORT_ENV="Docker Compose" \
-		-e GATEWAY_URL="http://gateway:8080" \
+		-e GATEWAY_URL="https://gateway:8080" \
 		-e METRICS_URL="http://gateway:9090" \
 		tests \
 		pytest tests/ -v --tb=short \
@@ -187,15 +188,17 @@ k8s-down:  ## delete the kind cluster
 
 # One-shot: full kind setup + pytest with Redis and TLS enabled.
 # This is what the CI integration job and 'make k8s-full' run.
+# TLS defaults on (matches the Helm chart's tls.enabled default) -- pass
+# TLS=0 to explicitly install with a plain-HTTP listener.
 # Override REDIS=0 or TLS=0 to disable.
 REDIS ?= 1
-TLS   ?= 0
+TLS   ?= 1
 
 .PHONY: k8s-full
 k8s-full: k8s-up certs images-load  ## full kind setup: cluster + Calico + cert-manager + Redis + helm + pytest
 	$(MAKE) helm-install-backends
 	$(MAKE) helm-install-gateway \
-		GATEWAY_EXTRA_SET="$(if $(filter 1,$(REDIS)),--set redis.enabled=true) $(if $(filter 1,$(TLS)),--set tls.enabled=true)"
+		GATEWAY_EXTRA_SET="$(if $(filter 1,$(REDIS)),--set redis.enabled=true,--set redis.enabled=false) $(if $(filter 1,$(TLS)),--set tls.enabled=true,--set tls.enabled=false)"
 	$(MAKE) test-k8s REDIS=$(REDIS)
 
 .PHONY: k8s-tls
@@ -290,15 +293,24 @@ test-k8s: venv  ## pytest via port-forward; set REDIS=1 to enable Redis nonce te
 	  echo "port-forwarding gateway 8080+9090 to localhost:$$GW_PORT/$$METRICS_PORT..."; \
 	  $(KUBECTL) -n $(GW_NS) port-forward svc/gateway $$GW_PORT:8080 $$METRICS_PORT:9090 & PF_PID=$$!; \
 	  sleep 3; \
-	  GATEWAY_URL=http://localhost:$$GW_PORT \
+	  SCHEME=http; TMP_CA=""; \
+	  if $(KUBECTL) -n $(GW_NS) get secret gateway-listener-tls >/dev/null 2>&1; then \
+	    echo "gateway-listener-tls secret found -- testing over HTTPS"; \
+	    SCHEME=https; TMP_CA=$$(mktemp); \
+	    $(KUBECTL) -n $(GW_NS) get secret gateway-listener-tls -o jsonpath="{.data.tls\.crt}" | base64 -d > $$TMP_CA; \
+	  fi; \
+	  GATEWAY_URL=$$SCHEME://localhost:$$GW_PORT \
 	  METRICS_URL=http://localhost:$$METRICS_PORT \
 	  CLIENTS_DIR=clients \
 	  KUBE_NAMESPACE=$(BE_NS) \
 	  REDIS_NAMESPACE=$(GW_NS) \
 	  GATEWAY_USES_REDIS=$(REDIS) \
+	  TLS_CA_CERT=$$TMP_CA \
+	  REQUESTS_CA_BUNDLE=$$TMP_CA \
 	  .venv/bin/python -m pytest tests/ -v $(TEST_ARGS); \
 	  STATUS=$$?; \
 	  kill $$PF_PID 2>/dev/null; wait $$PF_PID 2>/dev/null; \
+	  [ -n "$$TMP_CA" ] && rm -f $$TMP_CA; \
 	  exit $$STATUS; \
 	'
 
@@ -310,18 +322,27 @@ report-k8s: venv
 	  echo "port-forwarding gateway 8080+9090..."; \
 	  $(KUBECTL) -n $(GW_NS) port-forward svc/gateway $$GW_PORT:8080 $$METRICS_PORT:9090 & PF_PID=$$!; \
 	  sleep 3; \
-	  GATEWAY_URL=http://localhost:$$GW_PORT \
+	  SCHEME=http; TMP_CA=""; \
+	  if $(KUBECTL) -n $(GW_NS) get secret gateway-listener-tls >/dev/null 2>&1; then \
+	    echo "gateway-listener-tls secret found -- testing over HTTPS"; \
+	    SCHEME=https; TMP_CA=$$(mktemp); \
+	    $(KUBECTL) -n $(GW_NS) get secret gateway-listener-tls -o jsonpath="{.data.tls\.crt}" | base64 -d > $$TMP_CA; \
+	  fi; \
+	  GATEWAY_URL=$$SCHEME://localhost:$$GW_PORT \
 	  METRICS_URL=http://localhost:$$METRICS_PORT \
 	  CLIENTS_DIR=clients \
 	  KUBE_NAMESPACE=$(BE_NS) \
 	  REDIS_NAMESPACE=$(GW_NS) \
 	  GATEWAY_USES_REDIS=$(REDIS) \
+	  TLS_CA_CERT=$$TMP_CA \
+	  REQUESTS_CA_BUNDLE=$$TMP_CA \
 	  REPORT_ENV="Kind / Kubernetes" \
 	  .venv/bin/python -m pytest tests/ -v \
 	    --html=reports/kind-report.html --self-contained-html \
 	    $(TEST_ARGS); \
 	  STATUS=$$?; \
 	  kill $$PF_PID 2>/dev/null; wait $$PF_PID 2>/dev/null; \
+	  [ -n "$$TMP_CA" ] && rm -f $$TMP_CA; \
 	  exit $$STATUS; \
 	'
 	@echo ""

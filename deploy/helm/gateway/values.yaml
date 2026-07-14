@@ -22,15 +22,19 @@ service:
 # ---- client-facing TLS --------------------------------------------------
 # When tls.enabled=true the gateway listens on HTTPS for callers.
 # cert-manager issues the certificate from the configured issuer.
-# Set tls.enabled=false (default) to keep plain HTTP — useful for local dev.
+# TLS is on by default -- set tls.enabled=false for plain HTTP (local dev).
 tls:
-  enabled: false
+  enabled: true
   # cert-manager ClusterIssuer or Issuer name that will sign the cert.
   # "selfsigned" uses the self-signed ClusterIssuer created by the chart.
   issuerName: selfsigned
   issuerKind: ClusterIssuer   # ClusterIssuer | Issuer
-  # DNS name(s) that the certificate will cover.
-  dnsNames: []                # e.g. ["gateway.example.com"]
+  # Extra DNS name(s) the certificate should cover, in addition to the
+  # in-cluster service names (gateway, gateway.<namespace>.svc.cluster.local)
+  # which are always included. "localhost" is included by default so the
+  # `kubectl port-forward` based demo/test workflow works out of the box;
+  # override with your real hostname(s) for a production deployment.
+  dnsNames: ["localhost"]     # e.g. ["gateway.example.com"]
 
 # ---- Redis nonce cache --------------------------------------------------
 # When redis.enabled=true the gateway uses Redis for distributed replay
