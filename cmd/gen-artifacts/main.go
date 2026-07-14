@@ -145,6 +145,7 @@ func main() {
 		"issuer: \"secure-svc-gw\"\n" +
 		"audience: \"secure-svc-gw\"\n" +
 		"nonce_ttl: 5m\n" +
+		"redis_url: \"redis://redis:6379\"\n" +
 		"ca_cert: /etc/gateway/certs/ca.crt\n" +
 		"gateway_cert: /etc/gateway/certs/gateway.crt\n" +
 		"gateway_key: /etc/gateway/certs/gateway.key\n" +
