@@ -1,64 +1,88 @@
 # Secure Service Gateway
 
-A **production-shaped** Go reverse proxy that authenticates callers with
-Ed25519 JWTs, authorises them with a per-route scope model, verifies backend
-identity with mTLS + CA + SAN pinning, load-balances across healthy replicas
-with P2C + EWMA, and emits structured logs and Prometheus metrics for every
-decision.
+A Go reverse proxy that proves the identity of every caller **and** every
+backend before forwarding a single byte.
 
-The demo scenario is an internal AI model platform (LLM completion + embedding
-pools), but the gateway is service-agnostic — swap the route config and it
-fronts payments, orders, or any other internal service.
+It sits between internal clients (services, bots, analysts) and sensitive
+backend pools (LLMs, embedding services, internal APIs). Every request is
+authenticated with an Ed25519 JWT, authorised against a per-route scope, and
+forwarded only after the backend's mTLS certificate is verified against a
+pinned CA. Replayed tokens are blocked atomically. Unhealthy backends are
+automatically ejected and re-admitted. Every decision is logged and metered.
+
+The demo scenario models an internal AI platform, but the gateway is
+service-agnostic — swap `config/gateway.yaml` and it fronts payments, orders,
+or any other internal pool.
 
 ---
 
-## Quick start — two commands to run everything
+## Features
 
-### Option A — Docker Compose (fastest, recommended for evaluation)
-Zero cluster setup. Runs in ~90 seconds.
+| Feature | What it does |
+|---|---|
+| **Ed25519 JWT authentication** | Single algorithm pin — no `alg:none`, no HMAC↔RSA confusion. One key type, ~58 µs verify, 32-byte public keys. |
+| **Per-route scope authorisation** | Scopes are gateway config, not token claims. A caller cannot self-elevate by choosing a different route; the gateway decides what each prefix requires. |
+| **mTLS backend identity** | Every backend must present a cert signed by the internal CA with a matching SAN. Wrong CA or wrong SAN → TLS handshake fails; zero bytes forwarded. |
+| **Replay prevention** | `jti` stored atomically (`SET NX EX` — in-memory or Redis) for the token's lifetime. Fail-closed: a Redis outage blocks all new requests rather than opening a replay window. |
+| **Active health probing + ejection** | HTTP GET over mTLS every 2 s. Three consecutive failures eject a backend from the pool; two consecutive successes re-admit it. Impostor backends (wrong CA) never join the healthy pool. |
+| **P2C + EWMA load balancing** | O(1) pick across the healthy set. EWMA latency × in-flight score; slow pods drain naturally. Score resets on recovery so a stale EWMA doesn't starve a just-recovered backend. |
+| **Structured observability** | One JSON log line per decision (`allow`/`deny`/`route`) + 5 Prometheus metrics: request counts, auth failures, per-backend traffic, upstream latency histogram, backend health gauge. |
+| **CRD-driven configuration** | `SecureServiceGateway` CR → controller reconciles the gateway ConfigMap and triggers a rolling restart. Every config change is an auditable git diff. |
+| **NetworkPolicy enforcement** | Helm chart creates a Kubernetes `NetworkPolicy` that restricts backend access to pods carrying the gateway's label. Backends are unreachable from anything else on the cluster. |
+| **Optional listener TLS** | cert-manager-issued cert via `--set tls.enabled=true`. Redis nonce cache via `--set redis.enabled=true` for multi-replica replay safety. |
+
+---
+
+## Quick start
+
+### Option A — Docker Compose (fastest, Docker only)
 
 ```bash
 make demo && make test
 ```
 
-`make demo` generates crypto material, builds images, and starts the full stack
-(gateway + 6 backends + Redis). `make test` runs the full pytest suite inside
-the compose network and prints a pass/fail summary.
+Generates crypto material, builds images, starts the stack (gateway + 6
+backends + Redis), and runs the full pytest suite. Takes ~90 s.
 
-### Option B — Kind cluster (full production topology)
-
-#### (a) Build everything locally (no registry needed)
 ```bash
-make demo-local      # kind cluster + local build + helm install + CR apply + pytest
+make demo && make report   # same + produces reports/compose-report.html
 ```
 
-#### (b) Pull pre-built images from GHCR (no Go/Docker build needed)
-```bash
-make demo-ghcr       # kind cluster + ghcr.io pull + helm install + CR apply + pytest
+### Option B — Kind cluster (full Kubernetes topology)
+
+Requires `docker`, `kind`, `helm`, `kubectl` on PATH.
+
+#### Pull pre-built images from GHCR (recommended — no build needed)
+
+All three images are published to GHCR on every merge to `main`:
+
+```
+ghcr.io/nitinbhat/secure-svc-gw:latest
+ghcr.io/nitinbhat/secure-svc-backend:latest
+ghcr.io/nitinbhat/secure-svc-gw-controller:latest
 ```
 
-Both options install the gateway via Helm, apply the `SecureServiceGateway` CR
-which drives the controller to reconcile config + NetworkPolicy, and run the
-full 44-test pytest suite.
+```bash
+make demo-ghcr
+```
 
----
+Creates a 2-node kind cluster with Calico CNI and cert-manager, pulls the
+three images from GHCR, installs the Helm charts, applies the
+`SecureServiceGateway` CR, and runs the full 44-test pytest suite.
+No compiler, no Go toolchain, no Docker build.
 
-### Which to use?
+```bash
+make demo-ghcr && make report-kind   # adds reports/kind-report.html
+```
 
-| | Docker Compose | Kind |
-|---|---|---|
-| **Prerequisites** | Docker only | Docker + kind + helm + kubectl |
-| **Time to first test** | ~90 s | ~10 min |
-| **NetworkPolicy enforcement** | No (Linux iptables only) | Yes (Calico) |
-| **Multi-replica gateway** | No | Yes (2 pods) |
-| **CR-driven config** | No | Yes (controller watches CR) |
-| **Recommended for** | Evaluation, dev iteration | Production-topology validation |
+#### Build locally (no registry needed)
 
-Use Docker Compose to evaluate correctness and security reasoning. Use Kind
-when you want to validate the full Kubernetes control plane path including
-NetworkPolicy, cert-manager, and the CRD controller.
+```bash
+make demo-local
+```
 
----
+Same as above but builds `secure-svc-gw:dev`, `secure-svc-backend:dev`, and
+`secure-svc-gw-controller:dev` from source and loads them into kind.
 
 ---
 
@@ -278,44 +302,99 @@ P50_THRESHOLD_MS=100 P95_THRESHOLD_MS=300 P99_THRESHOLD_MS=500 \
   .venv/bin/pytest tests/test_12_perf_latency.py -v -s
 ```
 
-### Test matrix
+### What is covered and why
 
-| Test / File | Kind | Concern | What it validates |
-|---|---|---|---|
-| `TestVerify_HappyPath` … `TestVerify_WrongIssuer` (10 cases) | unit | Auth — JWT | One test per rejection reason: `no_token`, `unknown_kid`, `bad_signature`, `expired`, `not_yet_valid`, `wrong_issuer`, `wrong_audience`, `missing_jti`, `bad_claims` |
-| `TestVerify_AlgNone` / `AlgHS256` / `AlgRSA` | unit | Auth — alg confusion | Tokens with `alg` ≠ `EdDSA` are rejected before key lookup |
-| `TestVerify_TamperedHeader` / `TamperedPayload` / `TamperedSig` | unit | Auth — integrity | Single-byte flip anywhere in the JWT → `bad_signature` |
-| `TestVerify_MalformedJWT` / `BadBase64Sig` / `BadJSONPayload` | unit | Auth — input safety | Malformed tokens never panic |
-| `TestVerify_Concurrent` (200 goroutines) | unit | Auth — concurrency | Verify is safe under `-race`; all 200 accepted independently |
-| `FuzzVerify` | fuzz | Auth — input safety | Arbitrary byte sequences never cause a panic or 5xx |
-| `BenchmarkVerify` / `BenchmarkVerify_Parallel` | bench | Auth — perf | ~58 µs single-core, ~9 µs at 10 cores |
-| `TestNonce_NewToken` / `SameToken` / `ExpiredToken` | unit | Replay — in-memory | Second use of same `jti` → rejected; expired entry → accepted as new |
-| `TestNonce_ConcurrentReplay` (100 goroutines, same JWT) | unit | Replay — race | Exactly 1 goroutine succeeds; all others → `replay` under `-race` |
-| `TestRedisNonce_New` / `SameToken` / `TTLExpiry` | unit | Replay — Redis | `SET NX EX` semantics via miniredis; `FastForward` confirms TTL expiry |
-| `TestRedisNonce_Unavailable` | unit | Replay — fail-closed | Redis error → `false` (blocks request); never silently allows replay |
-| `TestRedisNonce_ConcurrentReplay` (50 goroutines) | unit | Replay — Redis race | Single atomic `SET NX`; only one goroutine wins under `-race` |
-| `TestPool_Distribution` / `DistributionFavorsLowLatency` | unit | LB — P2C | 1000 picks: fast backends get ≥ 80 % of traffic; slow/unhealthy get none |
-| `TestPool_InflightWeighting` / `EWMAReset` / `RecoveringBackendSelected` | unit | LB — EWMA | Score resets to 1.0 on recovery; in-flight count breaks ties |
-| `TestPool_NoneHealthy` / `SingleHealthy` | unit | LB — edge cases | 503-equivalent when all backends down; single healthy always selected |
-| `TestPool_Race` (concurrent pick + health flip) | unit | LB — concurrency | No data races under `-race` |
-| `BenchmarkPool_Pick` | bench | LB — perf | ~197 ns/op, 1 alloc |
-| `TestChecker_ThreeFailuresEjectBackend` / `TwoSuccessesRestoreBackend` | unit | Health — thresholds | Exact ejection + re-admission counts |
-| `TestChecker_NoFlapSuccessInterrupted` / `FailuresArePerBackend` | unit | Health — isolation | Success streak reset by one failure; counters are per-backend |
-| `TestChecker_ProbeHealthy` / `ProbeSick` / `ProbeUnreachable` | unit | Health — live HTTP | `httptest.Server` verifies real HTTP probes over loopback |
-| `TestBackendTLS_MissingCA` / `InvalidCA` / `MissingCertFile` / `MismatchedCertKey` | unit | Proxy — TLS errors | Each misconfiguration returns a clear error; no partial state |
-| `TestBackendTLS_ValidConfig` | unit | Proxy — TLS happy path | Config enforces `MinVersion=TLS12`, ServerName, RootCAs, client cert |
-| `test_01_happy_path.py` | integration | E2E — happy path | Analyst → LLM + embed; HTTP 200; `X-Upstream` ∈ `{llm-1,2,3}`; metrics +1 |
-| `test_02_authorization.py` | integration | Authz | `no_token` 401; `unknown_kid` 401; empty scope 403; wrong-service scope 403 |
-| `test_03_backend_identity.py` | integration | mTLS / impostor | `llm-4` (rogue CA) never healthy; 20 calls never land on it |
-| `test_04_health_shifting.py` | integration | Health shifting | Break → eject → restore → re-admit; verified via metrics + `X-Upstream` |
-| `test_05_credential_attacks.py` | integration | Credential attacks | Tampered sig / expired / replayed `jti` / wrong audience → each 401 |
-| `test_06_observability.py` | integration | Observability | All 5 Prometheus series present; `gateway_backend_healthy` for every backend |
-| `test_07_redis_restart.py` | integration | Replay — Redis outage | Redis down → fail-closed 401; restart → requests succeed again |
-| `test_08_cert_tls.py` | integration | TLS — cert quality | Cert not expired; TLS ≥ 1.2; hostname matches SAN; `requests verify=True` works |
-| `test_09_http_fuzzing.py` | integration | Input safety | 50× random tokens, binary, 100 KB, random routes, random bodies → never 5xx |
-| `test_10_header_attacks.py` | integration | Header attacks | `X-Forwarded-For` / `X-Real-IP` bypass attempts; duplicate `Authorization` (raw socket); `Content-Length` smuggling probe |
-| `test_11_replay_stress.py` | integration | Replay — stress | 100 threads × same JWT → exactly 1 success; `gateway_auth_failures_total{reason=replay}` delta matches |
-| `test_12_perf_latency.py` | integration | Latency SLOs | P50 < 500 ms, P95 < 1000 ms, P99 < 2000 ms (configurable via env vars); ASCII histogram printed with `-s` |
+The suite is split into two layers: Go unit tests (no process, race-detector
+on) and Python integration tests (real gateway process, full network path).
+
+#### Authentication
+
+Goal: every JWT rejection reason has exactly one test; the verifier never
+panics under any input.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `TestVerify_HappyPath` … `TestVerify_WrongIssuer` (10 cases) | unit | One path per rejection code: `no_token`, `unknown_kid`, `bad_signature`, `expired`, `not_yet_valid`, `wrong_issuer`, `wrong_audience`, `missing_jti`, `bad_claims` |
+| `TestVerify_AlgNone` / `AlgHS256` / `AlgRSA` | unit | Algorithm confusion: tokens with `alg` ≠ `EdDSA` are rejected before key lookup |
+| `TestVerify_TamperedHeader` / `TamperedPayload` / `TamperedSig` | unit | Integrity: a single-byte flip anywhere in the JWT → `bad_signature` |
+| `TestVerify_MalformedJWT` / `BadBase64Sig` / `BadJSONPayload` | unit | Malformed input never panics |
+| `TestVerify_Concurrent` (200 goroutines) | unit | Verify is data-race-free under `-race` |
+| `FuzzVerify` | fuzz | Arbitrary byte sequences never panic or return 5xx |
+| `BenchmarkVerify` / `BenchmarkVerify_Parallel` | bench | ~58 µs single-core, ~9 µs at 10 cores |
+| `test_02_authorization.py` | integration | `no_token` 401 · `unknown_kid` 401 · empty scope 403 · wrong-service scope 403 |
+| `test_05_credential_attacks.py` | integration | Tampered sig · expired · wrong audience → each 401 with correct reason label |
+
+#### Replay prevention
+
+Goal: exactly one use of any `jti`; fail-closed on cache outage; no race
+window even with 100 concurrent threads sharing the same token.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `TestNonce_NewToken` / `SameToken` / `ExpiredToken` | unit | Second use of same `jti` rejected; expired entry re-accepted |
+| `TestNonce_ConcurrentReplay` (100 goroutines, same JWT) | unit | Exactly 1 goroutine succeeds under `-race` |
+| `TestRedisNonce_New` / `SameToken` / `TTLExpiry` | unit | `SET NX EX` semantics via miniredis; `FastForward` confirms TTL |
+| `TestRedisNonce_Unavailable` | unit | Redis error → `false`; never silently allows replay |
+| `TestRedisNonce_ConcurrentReplay` (50 goroutines) | unit | Single atomic `SET NX`; only one goroutine wins under `-race` |
+| `test_07_redis_restart.py` | integration | Redis down → fail-closed 401; restart → requests succeed again |
+| `test_11_replay_stress.py` | integration | 100 threads × same JWT → exactly 1 success; Prometheus `reason=replay` delta matches |
+
+#### Backend identity and health
+
+Goal: a backend with the wrong CA cert never serves traffic; a failing backend
+is ejected and a recovering backend is re-admitted.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `TestChecker_ThreeFailuresEjectBackend` / `TwoSuccessesRestoreBackend` | unit | Exact ejection (3 fails) and re-admission (2 passes) counts |
+| `TestChecker_NoFlapSuccessInterrupted` / `FailuresArePerBackend` | unit | Success streak resets on one failure; counters are per-backend |
+| `TestChecker_ProbeHealthy` / `ProbeSick` / `ProbeUnreachable` | unit | Real HTTP probes over `httptest.Server` |
+| `TestBackendTLS_*` (5 cases) | unit | Each TLS misconfiguration (wrong CA, missing cert, mismatched key) returns a clear error |
+| `test_03_backend_identity.py` | integration | `llm-4` (rogue CA) never joins the healthy pool; 20 calls never land on it |
+| `test_04_health_shifting.py` | integration | Break → metric drop → restore → metric recovery, confirmed via `X-Upstream` |
+| `test_08_cert_tls.py` | integration | Cert not expired · TLS ≥ 1.2 · hostname matches SAN · `requests verify=True` succeeds |
+
+#### Load balancing
+
+Goal: P2C picks the lower-scored backend; EWMA drains slow pods naturally;
+O(1) pick is data-race-free.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `TestPool_Distribution` / `DistributionFavorsLowLatency` | unit | 1 000 picks: fast backends get ≥ 80 % of traffic; slow/unhealthy get none |
+| `TestPool_InflightWeighting` / `EWMAReset` / `RecoveringBackendSelected` | unit | Score resets to 1.0 on recovery; in-flight count breaks ties |
+| `TestPool_NoneHealthy` / `SingleHealthy` | unit | 503-equivalent when all down; single healthy always selected |
+| `TestPool_Race` (concurrent pick + health flip) | unit | No data races under `-race` |
+| `BenchmarkPool_Pick` | bench | ~197 ns/op, 1 alloc |
+
+#### Input hardening
+
+Goal: the gateway never returns 5xx on attacker-controlled input and cannot
+be confused by crafted headers.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `test_09_http_fuzzing.py` | integration | 50× random printable tokens · random binary · 100 KB body · random routes · random bodies → never 5xx |
+| `test_10_header_attacks.py` | integration | `X-Forwarded-For` / `X-Real-IP` bypass attempts · duplicate `Authorization` (raw socket) · `Content-Length` smuggling probe |
+
+#### Observability
+
+Goal: every decision produces a log line and increments the right Prometheus
+counter; no backend is invisible to the health gauge.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `test_01_happy_path.py` | integration | `gateway_requests_total{decision=allow}` increments on every allow |
+| `test_06_observability.py` | integration | All 5 Prometheus series present; `gateway_backend_healthy` gauge exists for every backend including the impostor |
+
+#### Performance
+
+Goal: auth overhead fits within real-world SLOs.
+
+| Test | Layer | What it proves |
+|---|---|---|
+| `BenchmarkVerify` / `BenchmarkVerify_Parallel` | bench | ~58 µs single-core, ~9 µs at 10 cores |
+| `test_12_perf_latency.py` | integration | P50 < 500 ms · P95 < 1 000 ms · P99 < 2 000 ms (configurable via env vars); ASCII histogram printed with `-s` |
 
 ---
 
@@ -736,18 +815,4 @@ deploy/
 
 ---
 
-## Trade-offs made for demo brevity
 
-- **Nonce cache defaults to in-process.** Enable Redis with `--set redis.enabled=true`
-  for multi-replica replay safety. The `NonceStore` interface is the only seam.
-- **Client-facing defaults to plain HTTP.** Set `--set tls.enabled=true` to enable
-  HTTPS. In production you would also terminate TLS at an ingress; either way mTLS
-  *to backends* is what proves identity.
-- **`gen-artifacts` writes unencrypted keys to disk.** Replace with Vault / SPIRE /
-  cert-manager in production.
-- **Health checker is single-process.** For horizontal scale-out, share ejection state
-  via the Kubernetes API or a shared pub/sub.
-- **Backend adapters are fake.** `POST /completions` returns a canned response so
-  assertions are deterministic. Swap in real provider SDKs behind the same HTTP contract.
-- **Controller uses stdlib only** (no controller-runtime) to keep the go.mod at
-  Go 1.21 without a `toolchain` directive bump.
