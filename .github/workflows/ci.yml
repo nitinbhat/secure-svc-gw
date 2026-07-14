@@ -70,6 +70,7 @@ jobs:
         with:
           context: .
           file: deploy/docker/gateway.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.GATEWAY_IMAGE }}:latest
@@ -81,6 +82,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./backend
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.BACKEND_IMAGE }}:latest
@@ -93,6 +95,7 @@ jobs:
         with:
           context: .
           file: deploy/docker/controller.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.CONTROLLER_IMAGE }}:latest
