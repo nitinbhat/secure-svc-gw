@@ -54,11 +54,12 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 def _get_redis_container():
-    """Return the first running Redis container matched by compose service label."""
+    """Return the Redis container (running or stopped) matched by compose service label."""
     if docker is None:
         return None
     dc = docker.from_env()
     candidates = dc.containers.list(
+        all=True,  # include stopped containers so teardown can restart after outage test
         filters={"label": f"com.docker.compose.service={REDIS_SERVICE}"}
     )
     return candidates[0] if candidates else None
@@ -109,7 +110,11 @@ def _start_redis() -> None:
         raise TimeoutError("Redis pod did not become Ready")
     else:
         c = _get_redis_container()
-        if c:
+        if c is None:
+            raise RuntimeError(
+                f"Cannot find Redis container to start (label={REDIS_SERVICE})"
+            )
+        if c.status != "running":
             c.start()
         # Wait for Redis to accept connections (give it up to 15s).
         deadline = time.time() + 15

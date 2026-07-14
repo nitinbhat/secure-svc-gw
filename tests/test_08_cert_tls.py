@@ -64,7 +64,7 @@ def _gateway_host_port():
 
 _requires_tls = pytest.mark.skipif(
     not GATEWAY_URL.startswith("https://"),
-    reason="gateway is not running with TLS (GATEWAY_URL is not https://); use make kind-full-tls",
+    reason="gateway is not running with TLS (GATEWAY_URL is not https://); use make k8s-tls",
 )
 
 
