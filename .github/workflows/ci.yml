@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration]
   pull_request:
     branches: [main]
 
@@ -47,7 +47,10 @@ jobs:
   build-push:
     name: Build & push images
     runs-on: ubuntu-latest
-    # Only push on main branch; PRs build but don't push
+    # Push on branch pushes (main + integration, per the `on.push` trigger
+    # above); PRs build but don't push. Every push gets a sha tag (used by
+    # smoke/integration-kind to pull the exact image just built here); main
+    # additionally gets `:latest` and integration gets `:integration`.
     permissions:
       contents: read
       packages: write
@@ -65,38 +68,65 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Gateway image metadata
+        id: meta-gateway
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GATEWAY_IMAGE }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=integration,enable=${{ github.ref == 'refs/heads/integration' }}
+
       - name: Build gateway image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/gateway.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.GATEWAY_IMAGE }}:latest
-            ${{ env.GATEWAY_IMAGE }}:${{ github.sha }}
+          tags: ${{ steps.meta-gateway.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Backend image metadata
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=integration,enable=${{ github.ref == 'refs/heads/integration' }}
 
       - name: Build backend image
         uses: docker/build-push-action@v6
         with:
           context: ./backend
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.BACKEND_IMAGE }}:latest
-            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+          tags: ${{ steps.meta-backend.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Controller image metadata
+        id: meta-controller
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.CONTROLLER_IMAGE }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=integration,enable=${{ github.ref == 'refs/heads/integration' }}
 
       - name: Build controller image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/controller.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ env.CONTROLLER_IMAGE }}:latest
-            ${{ env.CONTROLLER_IMAGE }}:${{ github.sha }}
+          tags: ${{ steps.meta-controller.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -104,33 +134,9 @@ jobs:
   # 3. Docker Compose smoke test (build + start only, no pytest)
   # ------------------------------------------------------------------
   smoke:
-    name: Compose smoke (build + start)
+    name: Compose smoke (build or pull + start + test)
     runs-on: ubuntu-latest
-    needs: [unit]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.21"
-          cache: true
-
-      - name: make demo (certs + up + metrics smoke)
-        run: make demo
-
-      - name: make down
-        if: always()
-        run: make down
-
-  # ------------------------------------------------------------------
-  # 4. Kind integration tests (full pytest suite)
-  # ------------------------------------------------------------------
-  integration-kind:
-    name: Integration tests (kind)
-    runs-on: ubuntu-latest
-    needs: [build-push]
-    # Only run on main pushes; PRs run smoke only to save time
-    if: github.event_name == 'push'
+    needs: [unit, build-push]
     permissions:
       contents: read
       packages: read
@@ -142,12 +148,55 @@ jobs:
           go-version: "1.21"
           cache: true
 
+      - name: make container (build locally + compose up + pytest)
+        if: github.event_name != 'push'
+        run: make container
+
       - name: Log in to GHCR
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: make demo (pull just-published GHCR images + compose up + pytest)
+        if: github.event_name == 'push'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: make demo
+
+      - name: Upload compose HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-test-report
+          path: reports/compose-report.html
+          if-no-files-found: warn
+
+      - name: make down
+        if: always()
+        run: make down
+
+  # ------------------------------------------------------------------
+  # 4. Kind integration tests (full pytest suite)
+  # ------------------------------------------------------------------
+  integration-kind:
+    name: Integration tests (kind)
+    runs-on: ubuntu-latest
+    needs: [unit, build-push]
+    # Only run on pushes (main or integration); PRs run smoke only to save time
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
 
       - name: Install kind
         run: |
@@ -162,17 +211,36 @@ jobs:
           go build -buildvcs=false -o bin/gen-artifacts ./cmd/gen-artifacts
           ./bin/gen-artifacts .
 
-      - name: kind-up + pull images from GHCR + helm-install with Redis
+      - name: k8s-up
+        run: make k8s-up
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull just-published GHCR images and load into kind
+        run: make images-pull IMAGE_TAG=${{ github.sha }}
+
+      - name: helm-install with Redis
         run: |
-          make kind-up
-          make images-pull IMAGE_TAG=${{ github.sha }}
           make helm-install-backends
           make helm-install-gateway \
             GATEWAY_EXTRA_SET="--set redis.enabled=true --set controller.enabled=true"
 
-      - name: Full pytest suite (Redis enabled)
-        run: make test-kind REDIS=1
+      - name: Full pytest suite (Redis enabled) + HTML report
+        run: make report-k8s REDIS=1
 
-      - name: kind-down
+      - name: Upload kind HTML report
         if: always()
-        run: make kind-down
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-test-report
+          path: reports/kind-report.html
+          if-no-files-found: warn
+
+      - name: k8s-down
+        if: always()
+        run: make k8s-down

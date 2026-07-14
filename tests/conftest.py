@@ -13,6 +13,7 @@ message instead of exploding.
 """
 from __future__ import annotations
 
+import datetime
 import os
 import time
 from pathlib import Path
@@ -136,12 +137,109 @@ def metric_value(name: str, labels: dict[str, str]) -> float:
 
 # ---- pretty test narration -----------------------------------------
 
+import logging as _logging
+
+_STEP_LOGGER = _logging.getLogger("gateway.steps")
+
+
 def narrate(msg: str) -> None:
-    """Print a scenario step. `pytest -s` shows these inline."""
+    """Print a scenario step inline (-s) and capture it in the log for HTML reports."""
     print(f"    - {msg}")
+    _STEP_LOGGER.info(msg)
+
+
+# Remove the old module-level list and stash key — log capture is the reliable
+# mechanism that avoids the conftest-double-import problem.
+_NARRATE_KEY: "pytest.StashKey[list]"  # kept for backwards compat; not used
+
+
+@pytest.fixture(autouse=True)
+def _narrate_collector(request):
+    """No-op — kept so old references don't break. Log capture handles steps."""
+    yield
 
 
 @pytest.fixture()
 def metrics_before():
     """Return the current metrics snapshot at the start of a test."""
     return snapshot_metrics()
+
+
+# ---- pytest-html report hooks ----------------------------------------
+
+
+def pytest_html_report_title(report):
+    report.title = "Secure Service Gateway — Integration Test Report"
+
+
+def pytest_sessionstart(session):
+    """Populate the HTML report Environment table via pytest-metadata's stash key.
+
+    Must run in pytest_sessionstart (not pytest_configure) so that
+    pytest-metadata has already initialised config.stash[metadata_key].
+    """
+    try:
+        from pytest_metadata.plugin import metadata_key
+        meta = session.config.stash[metadata_key]
+    except (ImportError, KeyError):
+        return
+    meta.setdefault("Project",      "Secure Service Gateway")
+    meta.setdefault("Gateway URL",  os.getenv("GATEWAY_URL", "http://localhost:8080"))
+    meta.setdefault("Metrics URL",  os.getenv("METRICS_URL", "http://localhost:9090"))
+    meta.setdefault("Environment",  os.getenv("REPORT_ENV", "Kind / Kubernetes"))
+    meta.setdefault(
+        "Redis Nonce",
+        "enabled" if os.getenv("GATEWAY_USES_REDIS", "0") == "1"
+        else "disabled (in-memory)",
+    )
+    meta.setdefault("Run Date", datetime.datetime.now().strftime("%Y-%m-%d %H:%M UTC"))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+
+    if report.when != "call":
+        return
+
+    try:
+        from pytest_html import extras as _extras
+    except ImportError:
+        return
+
+    report.extras = getattr(report, "extras", [])
+
+    # 1. Module-level docstring → "Requirement / Story" collapsible section
+    mod_doc = getattr(item.module, "__doc__", None)
+    if mod_doc:
+        safe = mod_doc.strip().replace("<", "&lt;").replace(">", "&gt;")
+        report.extras.append(_extras.html(
+            '<details open style="margin:6px 0">'
+            '<summary style="font-weight:600;cursor:pointer">Requirement / Story</summary>'
+            f'<pre style="white-space:pre-wrap;font-size:0.82em;background:#f6f8fa;'
+            f'padding:8px;border-radius:4px;margin:4px 0">{safe}</pre>'
+            '</details>'
+        ))
+
+    # 2. Test Steps from pytest log capture.
+    # narrate() calls _STEP_LOGGER.info() which is captured even with -s.
+    # Filtering by logger name "gateway.steps" avoids noise from other loggers.
+    caplog_text = getattr(report, "caplog", "") or ""
+    step_lines = [
+        line.split("gateway.steps    ")[-1].strip()
+        if "gateway.steps" in line else line.strip()
+        for line in caplog_text.splitlines()
+        if "gateway.steps" in line
+    ]
+    if step_lines:
+        rows = "".join(
+            f'<li style="padding:2px 0">{s.replace("<","&lt;").replace(">","&gt;")}</li>'
+            for s in step_lines
+        )
+        report.extras.append(_extras.html(
+            '<details open style="margin:6px 0">'
+            '<summary style="font-weight:600;cursor:pointer">Test Steps</summary>'
+            f'<ol style="font-size:0.85em;margin:4px 0 4px 18px">{rows}</ol>'
+            '</details>'
+        ))

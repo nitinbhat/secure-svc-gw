@@ -3,14 +3,15 @@
 //
 // It writes:
 //
-//	certs/ca.crt / ca.key         Root CA (trusted by gateway and all legit backends)
-//	certs/gateway.crt / .key      gateway's client cert (mTLS to backends)
-//	certs/llm.crt / .key          server cert (SAN: llm, llm-1..3, localhost)
-//	certs/embed.crt / .key        server cert (SAN: embed, embed-1..2, localhost)
-//	certs/rogue-ca.crt            SECOND CA -- for the spoofed-backend demo
-//	certs/rogue-llm.crt / .key    rogue cert claiming to be "llm", signed by rogue-ca
-//	clients/<sub>.json            Ed25519 key file for each caller
-//	config/gateway.yaml           ready-to-run gateway config
+//	certs/ca.crt / ca.key                   Root CA (trusted by gateway and all legit backends)
+//	certs/gateway.crt / .key                gateway's client cert (mTLS to backends)
+//	certs/gateway-listener.crt / .key       gateway's client-facing HTTPS listener cert (SAN: gateway, localhost, 127.0.0.1)
+//	certs/llm.crt / .key                    server cert (SAN: llm, llm-1..3, localhost)
+//	certs/embed.crt / .key                  server cert (SAN: embed, embed-1..2, localhost)
+//	certs/rogue-ca.crt                      SECOND CA -- for the spoofed-backend demo
+//	certs/rogue-llm.crt / .key              rogue cert claiming to be "llm", signed by rogue-ca
+//	clients/<sub>.json                      Ed25519 key file for each caller
+//	config/gateway.yaml                     ready-to-run gateway config (TLS everywhere: HTTPS listener + mTLS backends)
 //
 // The clients baked in are the demo's four callers:
 //
@@ -86,6 +87,17 @@ func main() {
 	writeCertPEM(filepath.Join(certsDir, "gateway.crt"), gwCert)
 	writeECKeyPEM(filepath.Join(certsDir, "gateway.key"), gwKey)
 
+	// --- gateway's client-facing HTTPS listener cert ---
+	// Client-facing TLS is on by default so "docker compose up" / "make up"
+	// serves HTTPS out of the box. SANs cover both the in-compose-network
+	// hostname ("gateway") and how a human/host machine reaches it
+	// ("localhost", "127.0.0.1").
+	listenerCert, listenerKey := mustLeaf(caCert, caKey, "gateway",
+		[]string{"gateway", "localhost", "127.0.0.1"},
+		x509.ExtKeyUsageServerAuth)
+	writeCertPEM(filepath.Join(certsDir, "gateway-listener.crt"), listenerCert)
+	writeECKeyPEM(filepath.Join(certsDir, "gateway-listener.key"), listenerKey)
+
 	// --- per-service server certs ---
 	// SANs contain BOTH the logical service name (matches gateway ServerName)
 	// and each real replica hostname. llm-4 is deliberately NOT here -- it's
@@ -145,6 +157,9 @@ func main() {
 		"issuer: \"secure-svc-gw\"\n" +
 		"audience: \"secure-svc-gw\"\n" +
 		"nonce_ttl: 5m\n" +
+		"redis_url: \"redis://redis:6379\"\n" +
+		"listen_cert: /etc/gateway/listener-tls/tls.crt\n" +
+		"listen_key: /etc/gateway/listener-tls/tls.key\n" +
 		"ca_cert: /etc/gateway/certs/ca.crt\n" +
 		"gateway_cert: /etc/gateway/certs/gateway.crt\n" +
 		"gateway_key: /etc/gateway/certs/gateway.key\n" +
@@ -166,9 +181,9 @@ func main() {
 	must(os.WriteFile(filepath.Join(configDir, "gateway.yaml"), []byte(cfg), 0o644))
 
 	fmt.Println("generated:")
-	fmt.Println("  certs/     -> CA + gateway + llm + embed + rogue-ca + rogue-llm")
+	fmt.Println("  certs/     -> CA + gateway + gateway-listener + llm + embed + rogue-ca + rogue-llm")
 	fmt.Println("  clients/   -> chatbot, search-svc, analyst, intern")
-	fmt.Println("  config/    -> gateway.yaml")
+	fmt.Println("  config/    -> gateway.yaml (HTTPS listener + mTLS backends)")
 }
 
 // ---- crypto helpers ----

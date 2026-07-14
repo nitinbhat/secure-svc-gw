@@ -30,6 +30,7 @@
 
 x-backend: &backend
   build: ./backend
+  image: ghcr.io/nitinbhat/secure-svc-backend:${IMAGE_TAG:-latest}
   restart: unless-stopped
   networks: [ssgw]
 
@@ -38,14 +39,17 @@ x-python-runner: &python-runner
     context: .
     dockerfile: tests/Dockerfile
   environment:
-    GATEWAY_URL: http://gateway:8080
+    GATEWAY_URL: https://gateway:8080
     METRICS_URL: http://gateway:9090
     CLIENTS_DIR: /work/clients
     PYTHONPATH: /work
     GATEWAY_USES_REDIS: "1"
+    TLS_CA_CERT: /work/certs/ca.crt
+    REQUESTS_CA_BUNDLE: /work/certs/ca.crt
   volumes:
     - ./client:/work/client:ro
     - ./clients:/work/clients:ro
+    - ./certs/ca.crt:/work/certs/ca.crt:ro
   networks: [ssgw]
 
 services:
@@ -113,27 +117,32 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/gateway.Dockerfile
+    image: ghcr.io/nitinbhat/secure-svc-gw:${IMAGE_TAG:-latest}
     environment:
       GATEWAY_CONFIG: /etc/gateway/config.yaml
     ports:
-      - "8080:8080"   # client-facing (JWT)
-      - "9090:9090"   # /metrics
+      - "8080:8080"   # client-facing (HTTPS, cert signed by ./certs/ca.crt)
+      - "9090:9090"   # /metrics (plain HTTP)
     volumes:
       - ./config/gateway.yaml:/etc/gateway/config.yaml:ro
       - ./certs/ca.crt:/etc/gateway/certs/ca.crt:ro
       - ./certs/gateway.crt:/etc/gateway/certs/gateway.crt:ro
       - ./certs/gateway.key:/etc/gateway/certs/gateway.key:ro
+      - ./certs/gateway-listener.crt:/etc/gateway/listener-tls/tls.crt:ro
+      - ./certs/gateway-listener.key:/etc/gateway/listener-tls/tls.key:ro
     depends_on: [llm-1, llm-2, llm-3, llm-4, embed-1, embed-2, redis]
     networks: [ssgw]
 
-  # ---- pytest test-runner (`make test`) ----
+  # ---- pytest test-runner (`make test` / `make report`) ----
   tests:
     <<: *python-runner
     volumes:
       - ./client:/work/client:ro
       - ./tests:/work/tests:ro
       - ./clients:/work/clients:ro
+      - ./certs/ca.crt:/work/certs/ca.crt:ro
       - ./pytest.ini:/work/pytest.ini:ro
+      - ./reports:/work/reports
       # test_04 uses docker-py to POST /admin/break inside a backend
       # container. Comment out to skip that scenario.
       - /var/run/docker.sock:/var/run/docker.sock

@@ -1,6 +1,7 @@
 # build outputs
 bin/
 dist/
+reports/
 
 # go build / module cache (e.g. if GOPATH or GOMODCACHE is inside the repo)
 .gocache/
